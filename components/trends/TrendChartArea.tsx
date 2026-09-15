@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis, Tooltip } from "recharts";
 import { ChartContainer } from "@/components/ui/chart";
 import { SKILL_COLORS } from "@/lib/skills-dictionary";
@@ -13,18 +14,20 @@ function CustomTooltip({
   active,
   payload,
   label,
+  data,
 }: {
   active?: boolean;
   payload?: Array<{ dataKey: string; value: number; color: string }>;
   label?: string;
+  data: Record<string, string | number>[];
 }) {
   if (!active || !payload?.length) return null;
-  // compute deltas vs first month (simple)
+  const firstRow = data[0];
   return (
     <div className="rounded-lg border border-[#1E293B] bg-[#0F172A] px-3 py-2.5 shadow-xl min-w-[200px]">
       <div className="mb-2 flex items-center justify-between text-[11px]">
         <span className="text-[#94A3B8]">{label} 2026</span>
-        <span className="text-[#64748B]">HN #4129</span>
+        <span className="text-[#475569]">HN #4129</span>
       </div>
       <div className="space-y-1.5">
         {payload
@@ -33,15 +36,14 @@ function CustomTooltip({
           .map((p) => {
             const skill = p.dataKey as string;
             const color = SKILL_COLORS[skill] ?? p.color ?? "#fff";
-            // delta mock derived from last value vs first — for tooltip we show static deltas matching PNG if Aug
-            const isAug = label === "Aug";
+            const firstVal = (firstRow?.[skill] as number) ?? 0;
+            const currentVal = p.value as number;
             let delta: string | null = null;
             let deltaColor = "text-[#22C55E]";
-            if (isAug) {
-              if (skill === "typescript") delta = "(+34%)";
-              else if (skill === "react") delta = "(+8%)";
-              else if (skill === "python") delta = "(-2%)";
-              if (delta?.startsWith("(-")) deltaColor = "text-[#EF4444]";
+            if (firstVal > 0) {
+              const pct = Math.round(((currentVal - firstVal) / firstVal) * 100);
+              delta = `${pct >= 0 ? "+" : ""}${pct}%`;
+              if (pct < 0) deltaColor = "text-[#EF4444]";
             }
             return (
               <div key={skill} className="flex items-center justify-between gap-4 text-xs">
@@ -61,6 +63,34 @@ function CustomTooltip({
 }
 
 export function TrendChartArea({ data, skills }: Props) {
+  const maxValue = useMemo(() => {
+    let max = 0;
+    for (const row of data) {
+      for (const s of skills) {
+        const v = Number(row[s] ?? 0);
+        if (v > max) max = v;
+      }
+    }
+    return max;
+  }, [data, skills]);
+
+  const yDomain = useMemo<[number, number]>(() => {
+    if (maxValue <= 0) return [0, 10];
+    const ceiling = Math.ceil(maxValue * 1.15);
+    const niceCeiling = Math.max(10, Math.ceil(ceiling / 10) * 10);
+    return [0, niceCeiling];
+  }, [maxValue]);
+
+  const yTicks = useMemo(() => {
+    const [min, max] = yDomain;
+    if (max <= 10) return [0, max];
+    const step = Math.max(1, Math.round(max / 5 / 10) * 10);
+    const ticks: number[] = [];
+    for (let v = 0; v <= max; v += step) ticks.push(v);
+    if (ticks[ticks.length - 1] !== max) ticks.push(max);
+    return ticks;
+  }, [yDomain]);
+
   return (
     <div className="relative w-full">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-3 text-[11px]">
@@ -72,7 +102,7 @@ export function TrendChartArea({ data, skills }: Props) {
             </span>
           ))}
         </div>
-        <span className="text-[#475569]">Normalized volume: mention frequency / 10k posts</span>
+        <span className="text-[#475569]">Mention count this month</span>
       </div>
       <div className="h-[300px] w-full">
         <ChartContainer
@@ -99,12 +129,11 @@ export function TrendChartArea({ data, skills }: Props) {
               tick={{ fill: "#475569", fontSize: 11 }}
               axisLine={false}
               tickLine={false}
-              domain={[0, 10000]}
-              ticks={[0, 2000, 4000, 6000, 8000, 10000]}
-              tickFormatter={(v) => (v === 0 ? "0" : `${v / 1000}k`)}
-              width={32}
+              domain={yDomain}
+              ticks={yTicks}
+              width={36}
             />
-            <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#1E293B", strokeDasharray: "3 3" }} />
+            <Tooltip content={<CustomTooltip data={data} />} cursor={{ stroke: "#1E293B", strokeDasharray: "3 3" }} />
             {skills.map((s) => (
               <Area
                 key={s}

@@ -1,18 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Sparkles } from "lucide-react";
 
 type Props = {
   skills: string[];
   range: "3M" | "6M" | "12M";
   data: Record<string, string | number>[];
+  defaultSkills: string[];
+  marketMovers: { rising: { skill: string; delta: number }[]; declining: { skill: string; delta: number }[] };
 };
 
-export function AITrendIntelligence({ skills, range, data }: Props) {
+export function AITrendIntelligence({ skills, range, data, defaultSkills, marketMovers }: Props) {
   const [summary, setSummary] = useState<string | null>(null);
   const [confidence, setConfidence] = useState<string>("98.4%");
   const [loading, setLoading] = useState(false);
+
+  const isMarketView = useMemo(
+    () => skills.length === defaultSkills.length && skills.every((s, i) => s === defaultSkills[i]),
+    [skills, defaultSkills]
+  );
+  const mode = isMarketView ? "market" : "custom";
 
   useEffect(() => {
     let cancelled = false;
@@ -22,7 +30,7 @@ export function AITrendIntelligence({ skills, range, data }: Props) {
         const res = await fetch("/api/trends-summary", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ skills, range, data }),
+          body: JSON.stringify({ skills, range, data, mode, marketMovers }),
         });
         if (!res.ok) throw new Error("failed");
         const json = await res.json() as { summary?: string; confidence?: number };
@@ -40,10 +48,10 @@ export function AITrendIntelligence({ skills, range, data }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [skills, range, data]);
+  }, [skills, range, data, mode, marketMovers]);
 
   const fallback =
-    "TypeScript continues its upward trajectory (+34% over 6 months), establishing definitive market dominance across both frontend and Node/fullstack roles. React remains stable near peak demand, while Python job mentions saw a slight contraction (-2%) in web-focused remote positions, shifting toward specialized AI/data workflows.";
+    "Market data is still loading. Summary will appear once trend data is available.";
 
   // render with colored deltas inline if using fallback
   const renderSummary = (text: string) => {

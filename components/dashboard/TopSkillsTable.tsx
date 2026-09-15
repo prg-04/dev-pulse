@@ -3,45 +3,41 @@
 import { useState, useMemo } from "react";
 import { motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
-import { mockTopSkills, type SkillRow } from "@/lib/mock/dashboard-data";
-import { cn } from "@/lib/utils";
+
+export type SkillRow = {
+  rank: number;
+  skill: string;
+  count: number;
+  delta: number;
+};
 
 type Props = {
-  skills?: SkillRow[];
+  skills: SkillRow[];
   onSkillSelect?: (skill: string) => void;
 };
 
-const SOURCES = ["All", "HackerNews", "Himalayas", "RemoteJobs", "Remotive"] as const;
-
-export function TopSkillsTable({ skills = mockTopSkills, onSkillSelect }: Props) {
-  const [filter, setFilter] = useState<(typeof SOURCES)[number]>("All");
+export function TopSkillsTable({ skills, onSkillSelect }: Props) {
   const [expanded, setExpanded] = useState(false);
 
   const maxCount = useMemo(() => Math.max(...skills.map((s) => s.count)), [skills]);
   const visible = expanded ? skills : skills.slice(0, 11);
 
+  if (skills.length === 0) {
+    return (
+      <div className="rounded-xl border border-[#1E293B] bg-[#0F172A] p-5">
+        <h3 className="font-[var(--font-heading)] text-[15px] font-semibold text-white">Top 50 skills</h3>
+        <p className="text-[11px] text-[#64748B]">Ranked by mentions this month</p>
+        <div className="mt-6 text-center text-xs text-[#475569]">No skill demand data available yet.</div>
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-xl border border-[#1E293B] bg-[#0F172A] p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
         <div>
           <h3 className="font-[var(--font-heading)] text-[15px] font-semibold text-white">Top 50 skills</h3>
           <p className="text-[11px] text-[#64748B]">Ranked by mentions this month</p>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {SOURCES.map((s) => (
-            <button
-              key={s}
-              onClick={() => setFilter(s)}
-              className={cn(
-                "rounded-md border px-2.5 py-1 text-[11px] transition-colors",
-                filter === s
-                  ? "border-[#14B8A6]/40 bg-[#14B8A6]/15 text-[#2DD4BF]"
-                  : "border-[#1E293B] bg-transparent text-[#64748B] hover:border-[#334155] hover:text-white"
-              )}
-            >
-              {s}
-            </button>
-          ))}
         </div>
       </div>
 

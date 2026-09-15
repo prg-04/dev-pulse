@@ -1,6 +1,6 @@
-import { mockMovers } from "@/lib/mock/dashboard-data";
+type Props = { movers: { rising: { skill: string; delta: number }[]; declining: { skill: string; delta: number }[] } };
 
-export function BiggestMovers() {
+export function BiggestMovers({ movers }: Props) {
   return (
     <div className="rounded-xl border border-[#1E293B] bg-[#0F172A] p-5">
       <div className="flex items-center justify-between">
@@ -11,7 +11,7 @@ export function BiggestMovers() {
         <div>
           <p className="text-[11px] font-semibold tracking-widest text-[#22C55E]">RISING</p>
           <div className="mt-2 space-y-2">
-            {mockMovers.rising.map((m) => (
+            {movers.rising.map((m) => (
               <div key={m.skill} className="flex items-center justify-between text-xs">
                 <span className="text-white">{m.skill}</span>
                 <span className="tabular-nums text-[#22C55E]">↑ {m.delta}%</span>
@@ -22,7 +22,7 @@ export function BiggestMovers() {
         <div>
           <p className="text-[11px] font-semibold tracking-widest text-[#EF4444]">DECLINING</p>
           <div className="mt-2 space-y-2">
-            {mockMovers.declining.map((m) => (
+            {movers.declining.map((m) => (
               <div key={m.skill} className="flex items-center justify-between text-xs">
                 <span className="text-white">{m.skill}</span>
                 <span className="tabular-nums text-[#EF4444]">↓ {Math.abs(m.delta)}%</span>
