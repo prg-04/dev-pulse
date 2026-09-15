@@ -37,6 +37,13 @@ yarn-error.log*
 # vercel
 .vercel
 
+# gstack / agents (local-only)
+.codegraph
+.agents/
+.claude/
+.omo/
+.opencode/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
