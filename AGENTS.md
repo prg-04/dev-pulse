@@ -64,7 +64,7 @@ own skill profile (deterministic overlap, not AI) and shown with a stack-match
 percentage, so the user's feed is implicitly personalized without them ever
 filling out a separate "preferences" form for it. The detail panel also presents
 an AI-restructured summary of the raw posting — About / The Role / Requirements —
-because postings arrive from four sources with wildly inconsistent formatting.
+because postings arrive from ten sources with wildly inconsistent formatting.
 
 **Standout feature 4 — Auto-Git Sync.** A connected GitHub username is scanned
 weekly against the user's public repositories. Languages and topics that match the
@@ -247,7 +247,7 @@ The product has seven pages, sharing one persistent top nav
 (`Dashboard · Trends · Jobs · Skills · Gap Report`, with a profile icon on the
 right that opens the Profile page) plus the unstyled-reference sign-in screen.
 The nav's live/offline indicator and the footer's "Data refreshed daily · Last
-update: X · 4 sources" line are shared across every page — build them once as a
+update: X · 10 sources" line are shared across every page — build them once as a
 layout-level component, not per-page. Every page except sign-in requires an
 active Supabase session; an unauthenticated visitor is redirected to sign-in.
 
@@ -344,12 +344,17 @@ user's row(s) (see Section 11):
    is display-only, populated from `gap_report_events`, not independently
    editable here. An "Auto-Git Sync" toggle turns the weekly sync on/off for
    this account without disconnecting the stored GitHub username.
-4. **Ingestion Sources & Crawlers** — per-account toggles for which of the four
+4. **Ingestion Sources & Crawlers** — per-account toggles for which of the ten
    global data sources count toward _this account's_ Jobs feed and alerts.
-   **This does not control the actual daily ingestion cron** — all four sources
+   **This does not control the actual daily ingestion cron** — all ten sources
    are always ingested globally regardless of any account's toggle state. The
    toggle only filters what that account sees and gets alerted on. Do not wire
-   this toggle to the ingestion pipeline itself.
+   this toggle to the ingestion pipeline itself. The reference mockup only
+   shows four toggle rows (HackerNews, Himalayas, RemoteJobs.org, Remotive),
+   since it predates the six sources added below — add the remaining six rows
+   (Arbeitnow, RemoteOK, Jobicy, Adzuna, Jooble, The Muse) in the same visual
+   style, grouped however reads cleanest (e.g. keyless sources first, then the
+   three that need a server-owned key) rather than inventing a new layout.
 5. **Market Intelligence Dispatch & Alerts** — the three alert types from
    Section 12c, each with its own on/off toggle.
 6. **Readout Key & JSON Export** — generates/displays/revokes the API bearer
@@ -504,6 +509,27 @@ npm install octokit
   filters (no auth required, max 20/request)
 - **RemoteJobs.org API**: `https://remotejobs.org/api/v1/docs` — jobs by
   category, pagination (no auth required)
+- **Arbeitnow API**: `https://documenter.getpostman.com/view/18545278/UVJbJdKh`
+  — job board API sourced from real ATS platforms (Greenhouse, SmartRecruiters,
+  Join.com, Team Tailor, Recruitee, Comeet), `remote` boolean,
+  `visa_sponsorship` filter, no auth required
+- **RemoteOK API**: `https://remoteok.com/api` — remote developer jobs, no
+  auth required; `tags` field is close to pre-extracted skill keywords
+- **Jobicy API**: `https://github.com/Jobicy/remote-jobs-api` — official docs,
+  no auth required, `industry`/`geo`/`tag` filters; do not poll more than
+  once an hour per Jobicy's own published guidance (irrelevant at our daily
+  cadence, but don't "helpfully" tighten the schedule later without checking)
+- **Adzuna API**: `https://developer.adzuna.com/docs` — `app_id` + `app_key`
+  (free, instant registration), scoped by country code in the URL path,
+  salary histograms and regional stats in addition to listings; read the
+  Terms of Service page for the mandatory "Jobs by Adzuna" attribution
+  requirement before displaying any Adzuna-sourced listing in the UI
+- **Jooble API**: request a free key at `https://jooble.org/api/about` —
+  POST-only, key embedded in the URL path (`jooble.org/api/{key}`), not a
+  header; 67-country coverage
+- **The Muse API**: `https://www.themuse.com/developers/api/v2` — works
+  keyless at a reduced rate limit, or with a free registered key for a much
+  higher one (see Section 10's rate-limit note)
 - **YouTube Data API v3**: `https://developers.google.com/youtube/v3/docs` —
   `search.list` quota cost, `videos.list` for duration/view count/description
   (chapter markers, where present, are read from the description text —
@@ -629,7 +655,7 @@ transcript-chunk embeddings — confirm the configured model supports an
 embeddings endpoint before relying on it in production.
 
 **Honest data-availability note — read before building any comp/liquidity/
-contractor filtering:** none of the four job-posting sources reliably provide
+contractor filtering:** none of the ten job-posting sources reliably provide
 structured company funding stage, liquidity tier, or contractor-classification
 data. Where the Career Target & Compensation Filter (Section 5f, item 2) or the
 Jobs page display these fields, they are populated by **best-effort keyword
@@ -641,35 +667,66 @@ Comp range follows the same rule where a source doesn't supply it structurally.
 The same honesty rule applies to chapters (Section 12b): not every video has
 them, and a missing chapter is a `null`/absent row, never a fabricated one.
 
+**Adzuna salary is sometimes model-predicted, not stated — this is the same
+honesty rule, applied to a source that will actively tempt you to break it.**
+Adzuna's response carries a `salary_is_predicted` flag: when a posting has no
+stated range, Adzuna estimates one from its own model and returns it anyway.
+Only ingest `comp_min`/`comp_max` from Adzuna when `salary_is_predicted` is
+false; when it's true, treat the posting exactly like a source with no salary
+data at all (`null`, renders as "Not disclosed"). Never store or display a
+predicted figure as if the employer stated it — that's fabrication with extra
+steps, and the fact that Adzuna itself computed the number doesn't change that.
+
 ---
 
 ## 10. Data Sources
 
-All sources below are public and require no per-user authentication. The
-YouTube Data API requires a free server-owned API key (no OAuth for the calls
-this project makes). The GitHub REST API requires a free server-owned personal
-access token for the higher authenticated rate limit, not OAuth. Resend and
-Supabase Auth's email delivery both require API keys but are outbound
-providers, not data sources.
+Seven of the ten job-posting sources below are public and require no
+per-user authentication or key at all. Three — Adzuna, Jooble, and The Muse —
+need a free, server-owned key/credential pair, the same pattern already used
+for the YouTube Data API and GitHub REST API below: register once, keep the
+credential server-side only (Section 2), never per-user. Resend and Supabase
+Auth's email delivery both require API keys but are outbound providers, not
+data sources.
 
-| Source                   | Endpoint                               | Auth               | Rate limit                                 | What it provides                                                                                      |
-| ------------------------ | -------------------------------------- | ------------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| HackerNews Algolia       | `hn.algolia.com/api/v1`                | None               | 10k req/hr                                 | Monthly "Who is Hiring" threads going back years — 400–900 posts per thread                           |
-| Himalayas                | `himalayas.app/jobs/api`               | None               | Max 20/req                                 | Remote jobs filterable by skill, seniority, timezone, country                                         |
-| RemoteJobs.org           | `remotejobs.org/api/v1/jobs`           | None               | Public                                     | Remote jobs by category, with salary data                                                             |
-| Remotive                 | `remotive.com/api/remote-jobs`         | None               | Public                                     | Remote tech jobs by category                                                                          |
-| YouTube Data API v3      | `googleapis.com/youtube/v3`            | API key            | 10,000 units/day (search.list = 100 units) | Video search by skill, metadata (views, duration, publish date, description text for chapter parsing) |
-| YouTube (public, no API) | `img.youtube.com`, `youtube.com/embed` | None               | N/A                                        | Thumbnails and inline player embeds                                                                   |
-| GitHub REST API          | `api.github.com`                       | PAT (server-owned) | 5,000 req/hr authenticated                 | Public repo list, languages, topics for a given username                                              |
+| Source                   | Endpoint                                             | Auth                           | Rate limit                                                      | What it provides                                                                                                                                                                                                            |
+| ------------------------ | ---------------------------------------------------- | ------------------------------ | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HackerNews Algolia       | `hn.algolia.com/api/v1`                              | None                           | 10k req/hr                                                      | Monthly "Who is Hiring" threads going back years — 400–900 posts per thread                                                                                                                                                 |
+| Himalayas                | `himalayas.app/jobs/api`                             | None                           | Max 20/req                                                      | Remote jobs filterable by skill, seniority, timezone, country                                                                                                                                                               |
+| RemoteJobs.org           | `remotejobs.org/api/v1/jobs`                         | None                           | Public                                                          | Remote jobs by category, with salary data                                                                                                                                                                                   |
+| Remotive                 | `remotive.com/api/remote-jobs`                       | None                           | Public                                                          | Remote tech jobs by category                                                                                                                                                                                                |
+| Arbeitnow                | `www.arbeitnow.com/api/job-board-api`                | None                           | Not published; poll politely at daily cadence                   | Jobs sourced from real ATS platforms (Greenhouse, SmartRecruiters, Join.com, Team Tailor, Recruitee, Comeet), `remote` flag, `visa_sponsorship` filter — EU-leaning, a real complement to the US-remote-heavy sources above |
+| RemoteOK                 | `remoteok.com/api`                                   | None                           | Not published; poll politely at daily cadence                   | High-volume dedicated developer remote-jobs board; `tags` field doubles as near-pre-extracted skill keywords                                                                                                                |
+| Jobicy                   | `jobicy.com/api/v2/remote-jobs`                      | None                           | Official guidance: no more than one automated poll per hour     | Remote IT/tech-leaning jobs, `industry=engineering` and `geo` filters, up to 200 per request                                                                                                                                |
+| Adzuna                   | `api.adzuna.com/v1/api/jobs/{country}/search/{page}` | `app_id` + `app_key` (free)    | 25/min, 250/day, 1,000/week, 2,500/month (published ToS limits) | Broad aggregator, ~20 countries, salary histograms and regional stats — see Section 9's `salary_is_predicted` caveat and this table's attribution note below                                                                |
+| Jooble                   | `POST jooble.org/api/{api_key}`                      | Key embedded in URL path, free | Not publicly published; watch for 429s                          | Aggregator, 67-country coverage, JSON body filters (`keywords`, `location`, `page`)                                                                                                                                         |
+| The Muse                 | `www.themuse.com/api/public/jobs`                    | Optional free key (`api_key`)  | 500 req/hr keyless, 3,600 req/hr with a free registered key     | Curated employer-posted listings (not aggregated/scraped), `category`/`level`/`location` filters                                                                                                                            |
+| YouTube Data API v3      | `googleapis.com/youtube/v3`                          | API key                        | 10,000 units/day (search.list = 100 units)                      | Video search by skill, metadata (views, duration, publish date, description text for chapter parsing)                                                                                                                       |
+| YouTube (public, no API) | `img.youtube.com`, `youtube.com/embed`               | None                           | N/A                                                             | Thumbnails and inline player embeds                                                                                                                                                                                         |
+| GitHub REST API          | `api.github.com`                                     | PAT (server-owned)             | 5,000 req/hr authenticated                                      | Public repo list, languages, topics for a given username                                                                                                                                                                    |
+
+**Adzuna attribution requirement — not optional.** Adzuna's Terms of Service
+require any UI displaying Adzuna-sourced listings to show a "Jobs by Adzuna"
+credit (their logo, a minimum size, and a link back to Adzuna) next to those
+listings. Add a small, source-specific attribution badge on Jobs-page cards
+whose `source = 'adzuna'` — this is a compliance requirement, not a nice-to-have,
+and it only applies to Adzuna-sourced cards, not the other nine sources.
 
 **HackerNews is the primary source for trend history.** Because the "Who is Hiring"
 threads go back years and are publicly archived via the Algolia API, this is the
 only source that enables month-by-month historical skill demand tracking. The other
-three job-posting sources feed the current-month leaderboard and the Jobs page feed.
+nine job-posting sources feed the current-month leaderboard and the Jobs page feed.
+
+**Adzuna's free tier is tight — scope queries deliberately, don't iterate broadly.**
+2,500 calls/month is roughly 80/day; a naive daily loop over many countries and
+several result pages each will exhaust the monthly cap within days, not weeks.
+Pick a small, fixed set of countries/queries for the daily cron (e.g. `us`, `gb`)
+rather than looping over all ~20 supported markets, and log remaining quota
+distinctly so a cap-out reads as "Adzuna quota exhausted," not a generic failure.
 
 **Ingestion runs once daily via Vercel Cron.** It does not run on user requests
 and is not affected by any account's source toggles (Section 5f, item 4) — those
-toggles filter what an account _sees_, not what gets ingested. All four job-posting
+toggles filter what an account _sees_, not what gets ingested. All ten job-posting
 APIs are called server-side in the cron handler regardless of any account's
 preferences. Results are written to Supabase. The dashboard, trends, and jobs
 pages all read from Supabase — none of them call the external APIs directly from
@@ -703,6 +760,8 @@ create table job_postings (
   id            uuid primary key default gen_random_uuid(),
   external_id   text not null unique,   -- source's own ID
   source        text not null,          -- 'hackernews' | 'himalayas' | 'remotejobs' | 'remotive'
+                                         -- | 'arbeitnow' | 'remoteok' | 'jobicy' | 'adzuna'
+                                         -- | 'jooble' | 'themuse'
   company       text,
   title         text,
   description   text,
@@ -775,7 +834,7 @@ create table profiles (
   comp_currency   text default 'USD',
   include_equity  boolean default false,
   contractor_pref text,                -- e.g. 'W8-BEN' | 'Deel/EOR'
-  monitored_sources text[] not null default '{hackernews,himalayas,remotejobs,remotive}',
+  monitored_sources text[] not null default '{hackernews,himalayas,remotejobs,remotive,arbeitnow,remoteok,jobicy,adzuna,jooble,themuse}',
   created_at      timestamptz default now(),
   updated_at      timestamptz default now()
 );
@@ -1076,13 +1135,21 @@ APIs or live AI calls triggered by a page load.
 **Pipeline steps in order:**
 
 1. Create an `ingestion_runs` record with `status: 'running'`
-2. Call all four job-posting data source APIs in parallel
+2. Call all ten job-posting data source APIs in parallel — the seven keyless
+   ones (HackerNews, Himalayas, RemoteJobs.org, Remotive, Arbeitnow, RemoteOK,
+   Jobicy) plus the three keyed ones (Adzuna, Jooble, The Muse), each using
+   its own server-owned credential per Section 19. A failure or empty result
+   from any single source (including a keyed one hitting its rate limit) must
+   not block the other nine — log per-source and continue, the same way the
+   other pipelines tolerate a single account or video failing (Section 12b
+   step order, Section 12d step 4)
 3. Deduplicate against existing `external_id` values in `job_postings`
 4. For each new posting: extract skill mentions from title + description using a
    normalised skill dictionary (see Section 14), and extract comp range /
    external URL / liquidity tier / contractor type where the source or the
    posting text provides them (Section 9's honest-data-gap note — extraction
-   only, never fabrication)
+   only, never fabrication; for Adzuna specifically, only take `comp_min`/
+   `comp_max` when `salary_is_predicted` is false, per Section 9)
 5. Insert new rows into `job_postings` and `skill_mentions`
 6. Upsert aggregated counts into `skill_demand_snapshots` (increment if row exists)
 7. Update the `ingestion_runs` record with `status: 'success'` and `jobs_ingested` count
@@ -1092,8 +1159,12 @@ APIs or live AI calls triggered by a page load.
 
 - Be triggered by a user request
 - Call the AI provider (skill extraction uses a dictionary match, not AI)
-- Be filtered by any account's `monitored_sources` toggle — always ingest all four
+- Be filtered by any account's `monitored_sources` toggle — always ingest all ten
 - Expose its endpoint without the Vercel Cron authentication header check
+- Query Adzuna broadly enough to burn its monthly cap in days — see Section
+  10's Adzuna quota note; scope country/query coverage deliberately
+- Store an Adzuna `salary_is_predicted: true` figure as if it were a stated
+  comp range
 
 ### 12b. Weekly Tutorial Indexing
 
@@ -1575,8 +1646,17 @@ Build to these unless Evans explicitly changes them:
   aggregations in a user request. The same applies to tutorial search — it
   reads `tutorial_chapters` and `tutorial_chunks`, never calls the YouTube API
   live.
-- **HackerNews is the only source for historical trend data.** The other three
+- **HackerNews is the only source for historical trend data.** The other nine
   job-posting sources feed current-month leaderboard and the Jobs feed only.
+- **Job ingestion covers ten sources, not four: seven keyless (HackerNews,
+  Himalayas, RemoteJobs.org, Remotive, Arbeitnow, RemoteOK, Jobicy) and three
+  keyed (Adzuna, Jooble, The Muse) using free, server-owned credentials —
+  same pattern as `YOUTUBE_API_KEY`/`GITHUB_TOKEN`, never per-user.** See
+  Section 10 for endpoints/limits and Section 12a for the pipeline. Adzuna's
+  listings require the "Jobs by Adzuna" attribution badge on the Jobs page
+  (Section 10) and its salary field must be dropped to `null` whenever
+  `salary_is_predicted` is true (Section 9) — both are compliance/honesty
+  requirements, not optional polish.
 - **The Skills page and the Profile page's Core Skill Stack are intentionally
   separate.** Skills-page submissions are point-in-time snapshots for a single
   Gap Report; `user_skills` is persistent and drives Jobs-page and alert
@@ -1602,6 +1682,42 @@ Build to these unless Evans explicitly changes them:
 
 - **Himalayas caps responses at 20 per request.** Use cursor pagination.
   Do not assume one request returns all jobs.
+
+- **Adzuna's free tier has hard, published caps: 25/min, 250/day, 1,000/week,
+  2,500/month.** These are tighter than they look once you multiply by
+  countries and pages — see Section 10's Adzuna quota note. Log the specific
+  429/quota response distinctly so it never gets mistaken for a broken
+  integration, the same way YouTube quota exhaustion is handled.
+
+- **Adzuna's salary field can be model-predicted, not stated.** Check
+  `salary_is_predicted` on every result; only trust `comp_min`/`comp_max`
+  when it's false (Section 9). This is easy to miss because the field always
+  contains _a_ number — the bug is silent, not a crash.
+
+- **Adzuna's Terms of Service require an on-page "Jobs by Adzuna" attribution
+  badge wherever their listings are displayed.** This isn't a generic
+  "credit your sources" nicety — it's a specific size/logo/link requirement
+  in their ToS (Section 10). Missing it is a compliance gap, not a style
+  nitpick.
+
+- **Jooble's API is POST-only with the key embedded in the URL path**
+  (`jooble.org/api/{key}`), not sent as a header or query param like the
+  other keyed sources here. Treat the whole URL as containing a secret —
+  never log it, never construct it client-side.
+
+- **Jobicy explicitly asks that automated polling not exceed once per hour.**
+  The daily ingestion cron is already well within this, but if anyone later
+  "tightens" the ingestion schedule to run more often, Jobicy specifically
+  needs to stay excluded from a faster cadence unless that guidance changes.
+
+- **The Muse works without a key, but only at 500 req/hr vs 3,600 req/hr with
+  a free registered key.** Register one anyway — an unkeyed integration that
+  works fine in testing can start silently truncating results once ingestion
+  runs alongside other traffic against the same IP.
+
+- **Arbeitnow and RemoteOK don't publish a numeric rate limit.** That's not
+  the same as "unlimited" — poll them once per daily cron run like every
+  other source, not more aggressively just because no cap is documented.
 
 - **YouTube does not expose authored chapters as a structured API field.**
   There is no `chapters` array on `videos.list`. Chapters have to be parsed

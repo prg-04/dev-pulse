@@ -10,7 +10,7 @@ type Props = {
   max?: number;
 };
 
-export function SkillSelector({ selected, onChange, max = 5 }: Props) {
+export function SkillSelector({ selected, onChange, max = 15 }: Props) {
   const [input, setInput] = useState("");
   const [ suggestions, setSuggestions] = useState<string[]>([]);
 

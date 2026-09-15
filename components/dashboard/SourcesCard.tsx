@@ -1,14 +1,14 @@
-import { mockSources } from "@/lib/mock/dashboard-data";
+type Props = { sources: { name: string; count: number; pct: number; color: string }[] };
 
-export function SourcesCard() {
+export function SourcesCard({ sources }: Props) {
   return (
     <div className="rounded-xl border border-[#1E293B] bg-[#0F172A] p-5">
       <div className="flex items-center justify-between">
         <h3 className="font-[var(--font-heading)] text-sm font-semibold text-white">Sources this month</h3>
-        <span className="text-[11px] text-[#475569]">4 ingest pipelines</span>
+        <span className="text-[11px] text-[#475569]">10 ingest pipelines</span>
       </div>
       <div className="mt-4 space-y-4">
-        {mockSources.map((s) => (
+        {sources.map((s) => (
           <div key={s.name}>
             <div className="flex items-center justify-between text-xs">
               <span className="font-medium text-white">{s.name}</span>

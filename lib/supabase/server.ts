@@ -6,6 +6,7 @@ export async function createClient() {
   const cookieStore = await cookies();
   const url = getSupabaseUrl();
   const anonKey = getSupabaseAnonKey();
+  console.log("[server-client] url:", url, "anonKey present:", !!anonKey, "anonKey prefix:", anonKey?.slice(0, 12));
   if (!url || !anonKey) {
     return null;
   }
