@@ -1,0 +1,12 @@
+# local-only — never upload to Vercel
+.codegraph
+.agents
+.claude
+.omo
+.opencode
+.git
+design
+public/Screenshot*
+.env.local
+.env
+*.tsbuildinfo

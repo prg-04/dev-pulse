@@ -93,15 +93,41 @@ function parseChapters(description: string): ParsedChapter[] {
   return chapters;
 }
 
+export function normalizeTranscriptOffsets(
+  transcript: { offset: number; text: string; duration?: number }[]
+): { offset: number; text: string }[] {
+  if (transcript.length === 0) return [];
+  const hasFractional = transcript.some(
+    (t) => t.offset % 1 !== 0 || ((t as { duration?: number }).duration ?? 0) % 1 !== 0
+  );
+  const maxOffset = Math.max(...transcript.map((t) => t.offset));
+  const isMs = !hasFractional && maxOffset > 100000;
+  if (!isMs) {
+    const smallMs = !hasFractional && maxOffset > 5000 && maxOffset < 100000;
+    if (smallMs) {
+      const avgGap =
+        transcript.length > 1
+          ? (transcript[transcript.length - 1].offset - transcript[0].offset) / (transcript.length - 1)
+          : 0;
+      if (avgGap > 100) {
+        return transcript.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
+      }
+    }
+    return transcript.map((t) => ({ offset: t.offset, text: t.text }));
+  }
+  return transcript.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
+}
+
 function chunkTranscript(
   transcript: { offset: number; text: string }[]
 ): TranscriptChunk[] {
   if (transcript.length === 0) return [];
+  const normalized = normalizeTranscriptOffsets(transcript as { offset: number; text: string; duration?: number }[]);
 
   const chunks: TranscriptChunk[] = [];
-  let currentChunk: TranscriptChunk = { start_seconds: transcript[0].offset, text: "" };
+  let currentChunk: TranscriptChunk = { start_seconds: normalized[0].offset, text: "" };
 
-  for (const item of transcript) {
+  for (const item of normalized) {
     const chunkEnd = currentChunk.start_seconds + CHUNK_DURATION_SECONDS;
     if (item.offset >= chunkEnd && currentChunk.text.trim().length > 0) {
       chunks.push(currentChunk);
@@ -309,7 +335,6 @@ async function hasGenerateQuotaForVideo(
     currentLen += 1;
   }
   if (currentLen > 0) windows += 1;
-  windows = Math.min(windows, 8);
   const { generate_calls } = await getTodayUsage(supabase);
   return generate_calls + windows <= DAILY_GENERATE_LIMIT;
 }
@@ -500,7 +525,7 @@ async function indexSkill(
                   cur += c.chunk_text.length; len += 1;
                 }
                 if (len > 0) w += 1;
-                return Math.min(w, 8);
+                return w;
               })();
               const t0 = Date.now();
               const lesson = await generateLessonForVideo({
@@ -513,6 +538,11 @@ async function indexSkill(
               lessonGenerateMs += Date.now() - t0;
               if (lesson) {
                 await incrementGenerateUsage(supabase, windowsForMetric);
+                if (lesson.stats) {
+                  console.info(
+                    `[tutorial-index] Lesson stats for ${video.video_id}: ${JSON.stringify(lesson.stats)}`,
+                  );
+                }
                 const { error: lessonError } = await supabase.from("video_lessons").upsert(
                   {
                     video_id: video.video_id,
@@ -606,7 +636,7 @@ async function indexSkill(
               cur += c.chunk_text.length; len += 1;
             }
             if (len > 0) w += 1;
-            return Math.min(w, 8);
+            return w;
           })();
           const t0 = Date.now();
           const lesson = await generateLessonForVideo({
@@ -619,6 +649,11 @@ async function indexSkill(
           lessonGenerateMs += Date.now() - t0;
           if (lesson) {
             await incrementGenerateUsage(supabase, windowsForMetric);
+            if (lesson.stats) {
+              console.info(
+                `[tutorial-index] Backfill lesson stats for ${video.video_id}: ${JSON.stringify(lesson.stats)}`,
+              );
+            }
             const { error: lessonError } = await supabase.from("video_lessons").upsert(
               {
                 video_id: video.video_id,
