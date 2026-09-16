@@ -7,7 +7,7 @@ import { generateObject, generateText } from "ai";
 // Zod schemas — structured output contract for lesson notes
 // ---------------------------------------------------------------------------
 
-export const CURRENT_LESSON_MODEL = "gemini-3.6-flash-concept-v2"; // bump when prompt/windowing/narration guard changes — indexSkill regenerates when video_lessons.model != this
+export const CURRENT_LESSON_MODEL = "gemini-3.6-flash-concept-v3"; // v3: tail-window no longer merges, chapter fallback to window.startSeconds, transcript truncation warned, per-video stats added
 
 const MAX_SECTIONS_PER_VIDEO = 40; // keep in sync with LessonOutputSchema's sections max below
 
@@ -167,8 +167,15 @@ export function filterToAllowedTimestamps(
 // this replaces that with per-window generation instead.
 // ---------------------------------------------------------------------------
 
-const WINDOW_CHAR_BUDGET = 6000; // per-call transcript budget, leaves headroom vs a flat 8000 cap
-export const MAX_WINDOWS_PER_VIDEO = 8; // raised from 3 — was 8→3 for free-tier, now 8 again to cover 3h+ videos end-to-end; see prompts/2026-09-15-ai-lesson-notes-fix.md
+export const WINDOW_CHAR_BUDGET = 6000; // per-call transcript budget, leaves headroom vs a flat 8000 cap
+/**
+ * Soft target, no longer a hard truncation ceiling.
+ * buildWindows() now produces as many windows as needed (one per WINDOW_CHAR_BUDGET).
+ * Cost control is via DAILY_GENERATE_LIMIT / hasGenerateQuotaForVideo / ai_daily_usage,
+ * not by collapsing tail windows. See Fix #1 (2026-09-16).
+ */
+export const MAX_WINDOWS_PER_VIDEO = 8; // retained for backward-compat with hasGenerateQuotaForVideo estimation; no longer merges tail in buildWindows
+export const LEGACY_MAX_WINDOWS_PER_VIDEO = 8;
 
 // --- Content-quality guards (sponsor/music, verbatim, code shape) ---
 
@@ -272,7 +279,7 @@ type TranscriptWindow = {
   endSeconds: number;
 };
 
-function buildWindows(chunks: TranscriptChunk[]): TranscriptWindow[] {
+export function buildWindows(chunks: TranscriptChunk[]): TranscriptWindow[] {
   const sorted = [...chunks].sort((a, b) => a.start_seconds - b.start_seconds);
   const windows: TranscriptWindow[] = [];
   let current: TranscriptChunk[] = [];
@@ -300,26 +307,23 @@ function buildWindows(chunks: TranscriptChunk[]): TranscriptWindow[] {
     });
   }
 
-  // If a very long video produces more windows than the budget allows,
-  // merge the tail windows together rather than silently dropping content —
-  // coarser grounding for the back half beats no coverage at all.
-  if (windows.length > MAX_WINDOWS_PER_VIDEO) {
-    const head = windows.slice(0, MAX_WINDOWS_PER_VIDEO - 1);
-    const tail = windows.slice(MAX_WINDOWS_PER_VIDEO - 1);
-    const mergedTail: TranscriptWindow = {
-      chunks: tail.flatMap((w) => w.chunks),
-      startSeconds: tail[0].startSeconds,
-      endSeconds: tail[tail.length - 1].endSeconds,
-    };
-    return [...head, mergedTail];
-  }
-
   return windows;
+}
+
+export function estimateWindowsNeeded(chunks: TranscriptChunk[]): number {
+  return buildWindows(chunks).length;
 }
 
 // ---------------------------------------------------------------------------
 // Single-window generation call (extracted so the multi-window loop can reuse it)
 // ---------------------------------------------------------------------------
+
+export type WindowSkipReason =
+  | "no_allowed_timestamp"
+  | "empty_transcript"
+  | "sponsor_noise"
+  | "generate_failed"
+  | "fallback_used";
 
 async function generateForWindow(params: {
   videoId: string;
@@ -329,7 +333,7 @@ async function generateForWindow(params: {
   allowedTimestamps: number[]; // full-video list; filtered to this window's range below
   windowLabel?: string;
   model: Parameters<typeof generateObject>[0]["model"];
-}): Promise<z.infer<typeof LessonWindowOutputSchema> | null> {
+}): Promise<{ data: z.infer<typeof LessonWindowOutputSchema> | null; skipReason?: WindowSkipReason; fallbackUsed?: boolean; transcriptTruncated?: boolean }> {
   const {
     videoId,
     videoTitle,
@@ -340,19 +344,32 @@ async function generateForWindow(params: {
     model,
   } = params;
 
-  const windowAllowed = allowedTimestamps.filter(
+  let windowAllowed = allowedTimestamps.filter(
     (t) => t >= window.startSeconds && t <= window.endSeconds,
   );
-  if (windowAllowed.length === 0) return null;
+  let fallbackUsed = false;
+  if (windowAllowed.length === 0) {
+    windowAllowed = [window.startSeconds];
+    fallbackUsed = true;
+    console.warn(
+      `[lesson-generation] No chapter timestamp in window [${window.startSeconds}-${window.endSeconds}] for ${videoId} — falling back to window start ${window.startSeconds}s`,
+    );
+  }
 
-  const transcript = window.chunks
-    .map((c) => c.chunk_text)
-    .join(" ")
-    .slice(0, WINDOW_CHAR_BUDGET);
-  if (transcript.trim().length < 40) return null;
+  const rawTranscript = window.chunks.map((c) => c.chunk_text).join(" ");
+  let transcriptTruncated = false;
+  let transcript = rawTranscript;
+  if (rawTranscript.length > WINDOW_CHAR_BUDGET) {
+    transcript = rawTranscript.slice(0, WINDOW_CHAR_BUDGET);
+    transcriptTruncated = true;
+    console.warn(
+      `[lesson-generation] Window [${window.startSeconds}-${window.endSeconds}] for ${videoId} transcript truncated from ${rawTranscript.length} to ${WINDOW_CHAR_BUDGET} chars — buildWindows produced an oversized window`,
+    );
+  }
+  if (transcript.trim().length < 40) return { data: null as unknown as z.infer<typeof LessonWindowOutputSchema>, skipReason: "empty_transcript" as WindowSkipReason };
   if (isWindowSponsorNoise(transcript)) {
     console.warn(`[lesson-generation] Skipping sponsor/music window [${window.startSeconds}-${window.endSeconds}] for ${videoId}`);
-    return null;
+    return { data: null as unknown as z.infer<typeof LessonWindowOutputSchema>, skipReason: "sponsor_noise" as WindowSkipReason };
   }
 
   const userPrompt = LESSON_USER_PROMPT_TEMPLATE({
@@ -371,7 +388,7 @@ async function generateForWindow(params: {
       schema: LessonWindowOutputSchema,
       maxOutputTokens: 2500,
     });
-    return result.object;
+    return { data: result.object, fallbackUsed, transcriptTruncated };
   } catch (goErr) {
     console.warn(
       `[lesson-generation] generateObject failed for ${videoId} window [${window.startSeconds}-${window.endSeconds}], falling back to generateText:`,
@@ -395,13 +412,13 @@ async function generateForWindow(params: {
       const validated = LessonWindowOutputSchema.safeParse(parsed);
       if (!validated.success)
         throw new Error(`Zod validation failed: ${validated.error.message}`);
-      return validated.data;
+      return { data: validated.data, fallbackUsed, transcriptTruncated };
     } catch (textErr) {
       console.error(
         `[lesson-generation] Both generateObject and generateText failed for ${videoId} window [${window.startSeconds}-${window.endSeconds}]:`,
         textErr,
       );
-      return null;
+      return { data: null as unknown as z.infer<typeof LessonWindowOutputSchema>, skipReason: "generate_failed" as WindowSkipReason };
     }
   }
 }
@@ -423,13 +440,26 @@ async function generateForWindow(params: {
  * - Returns null on total failure (caller should log and continue, not
  *   crash the cron run).
  */
+export type LessonGenerationResult = {
+  summary: string | null;
+  sections: LessonSection[];
+  stats: {
+    windowsTotal: number;
+    windowsSucceeded: number;
+    windowsSkipped: number;
+    windowsFallbackTimestamp: number;
+    windowsTruncated: number;
+    skipReasons: Record<string, number>;
+  };
+};
+
 export async function generateLessonForVideo(params: {
   videoId: string;
   videoTitle: string;
   channelName: string;
   allowedTimestamps: number[]; // real chapter/chunk start_seconds across the whole video
   chunks: TranscriptChunk[]; // ordered transcript chunks across the whole video
-}): Promise<{ summary: string | null; sections: LessonSection[] } | null> {
+}): Promise<LessonGenerationResult | null> {
   const { videoId, videoTitle, channelName, allowedTimestamps, chunks } =
     params;
 
@@ -447,6 +477,7 @@ export async function generateLessonForVideo(params: {
   }
 
   const allowedSet = new Set(allowedTimestamps);
+  const fallbackTimestamps = new Set<number>();
   const windows = buildWindows(chunks);
 
   const { createTextModel, getProviderMeta } =
@@ -457,6 +488,11 @@ export async function generateLessonForVideo(params: {
 
   const allSections: LessonSection[] = [];
   const summaries: string[] = [];
+  let windowsSucceeded = 0;
+  let windowsSkipped = 0;
+  let windowsFallbackTimestamp = 0;
+  let windowsTruncated = 0;
+  const skipReasons: Record<string, number> = {};
 
   for (let i = 0; i < windows.length; i++) {
     const windowLabel =
@@ -472,9 +508,21 @@ export async function generateLessonForVideo(params: {
       windowLabel,
       model,
     });
-    if (!result) continue;
-    if (result.summary) summaries.push(result.summary.trim());
-    allSections.push(...result.sections);
+    if (!result || !result.data) {
+      windowsSkipped++;
+      const reason = (result as { skipReason?: string })?.skipReason ?? "unknown";
+      skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+      continue;
+    }
+    if (result.fallbackUsed) {
+      windowsFallbackTimestamp++;
+      fallbackTimestamps.add(windows[i].startSeconds);
+      allowedSet.add(windows[i].startSeconds);
+    }
+    if (result.transcriptTruncated) windowsTruncated++;
+    windowsSucceeded++;
+    if (result.data.summary) summaries.push(result.data.summary.trim());
+    allSections.push(...result.data.sections);
   }
 
   if (allSections.length === 0) {
@@ -485,6 +533,7 @@ export async function generateLessonForVideo(params: {
   }
 
   // Never trust the model on timestamps, even after windowing.
+  // allowedSet now includes fallback window.startSeconds that were synthesized when no chapter fell in range.
   const timestampFiltered = filterToAllowedTimestamps(allSections, allowedSet);
   if (timestampFiltered.length === 0) {
     console.warn(
@@ -531,13 +580,23 @@ export async function generateLessonForVideo(params: {
 
   const finalSections = deduped.slice(0, MAX_SECTIONS_PER_VIDEO);
 
+  const stats = {
+    windowsTotal: windows.length,
+    windowsSucceeded,
+    windowsSkipped,
+    windowsFallbackTimestamp,
+    windowsTruncated,
+    skipReasons,
+  };
+
   console.info(
-    `[lesson-generation] Generated lesson for ${videoId} via ${modelId}: ${finalSections.length} sections across ${windows.length} window(s)`,
+    `[lesson-generation] Generated lesson for ${videoId} via ${modelId}: ${finalSections.length} sections across ${windows.length} window(s) — succeeded=${windowsSucceeded} skipped=${windowsSkipped} fallback=${windowsFallbackTimestamp} truncated=${windowsTruncated} reasons=${JSON.stringify(skipReasons)}`,
   );
 
   return {
     summary: summaries[0] ? summaries[0].slice(0, 600) : null,
     sections: finalSections,
+    stats,
   };
 }
 
