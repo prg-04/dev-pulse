@@ -106,7 +106,7 @@ export async function POST(req: NextRequest) {
       model,
       value: skill,
     });
-    embedding = emb;
+    embedding = emb.length > 1536 ? emb.slice(0, 1536) : emb;
   } catch (err) {
     console.error("tutorial-search embed failed", err);
     // Embedding unavailable — return empty rather than fall back to substring matching

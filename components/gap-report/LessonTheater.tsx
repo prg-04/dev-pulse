@@ -157,6 +157,14 @@ export function LessonTheater({
         setLesson(null);
         return;
       }
+      if (res.status === 202) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string; reason?: string };
+        const msg = j.error ?? j.reason ?? "Notes are still being generated";
+        lessonErrorCache.set(tutorial.video_id, msg);
+        setLessonError(msg);
+        setLesson(null);
+        return;
+      }
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error((j as { error?: string }).error ?? `Failed: ${res.status}`);

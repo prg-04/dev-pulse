@@ -4,6 +4,7 @@ import { CURRENT_LESSON_MODEL, generateLessonForVideo } from "@/lib/lesson-gener
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 async function hasGenerateQuota(
   supabase: ReturnType<typeof createServiceRoleClient>,
