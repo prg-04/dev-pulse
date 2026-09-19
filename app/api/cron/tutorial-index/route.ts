@@ -8,6 +8,7 @@ import {
   generateLessonBatch,
   LESSON_BATCH_SIZE,
   WINDOW_CHAR_BUDGET,
+  type LessonSection,
 } from "@/lib/lesson-generation";
 
 export const runtime = "nodejs";
@@ -431,26 +432,8 @@ async function indexSkill(
       } catch (err) {
         console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, err);
       }
-      // 2. Best-effort embedding update — 429 no longer blocks persistence
-      try {
-        const chapterLabels = chapters.map((c) => c.label);
-        const chapterEmbeddings = await embedTexts(chapterLabels);
-        for (let i = 0; i < chapters.length; i++) {
-          const emb = chapterEmbeddings[i];
-          if (!emb) continue;
-          const truncated = emb.length > 1536 ? emb.slice(0, 1536) : emb;
-          const { error: updateError } = await supabase
-            .from("tutorial_chapters")
-            .update({ label_embedding: truncated })
-            .eq("video_id", video.video_id)
-            .eq("start_seconds", chapters[i].start_seconds);
-          if (updateError) {
-            console.warn(`[tutorial-index] Chapter embedding update failed for ${video.video_id} @${chapters[i].start_seconds}s:`, updateError.message);
-          }
-        }
-      } catch (err) {
-        console.warn(`[tutorial-index] Chapter embedding best-effort failed for ${video.video_id}, chapters persisted without embeddings:`, (err as Error).message);
-      }
+      // Embedding is best-effort and runs AFTER lesson generation so a quota
+      // exhaustion or timeout during embedding does not block lesson init.
     }
 
     // --- Transcript ---
@@ -494,27 +477,8 @@ async function indexSkill(
       } catch (err) {
         console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, err);
       }
-      // 2. Best-effort embedding update — quota 429 no longer blocks lesson generation
-      try {
-        const chunkTexts = transcriptChunks.map((c) => c.text);
-        const chunkEmbeddings = await embedTexts(chunkTexts);
-        for (let i = 0; i < transcriptChunks.length; i++) {
-          const emb = chunkEmbeddings[i];
-          if (!emb) continue;
-          const truncated = emb.length > 1536 ? emb.slice(0, 1536) : emb;
-          const { error: updateError } = await supabase
-            .from("tutorial_chunks")
-            .update({ embedding: truncated })
-            .eq("video_id", video.video_id)
-            .eq("start_seconds", transcriptChunks[i].start_seconds)
-            .eq("skill_tag", skill);
-          if (updateError) {
-            console.warn(`[tutorial-index] Chunk embedding update failed for ${video.video_id} @${transcriptChunks[i].start_seconds}s:`, updateError.message);
-          }
-        }
-      } catch (err) {
-        console.warn(`[tutorial-index] Chunk embedding best-effort failed for ${video.video_id}, chunks persisted without embeddings:`, (err as Error).message);
-      }
+      // Embedding is best-effort and runs AFTER lesson generation so a quota
+      // exhaustion or timeout during embedding does not block lesson init.
     }
 
     const needsLesson = chapters.length > 0 || transcriptChunks.length > 0;
@@ -522,12 +486,25 @@ async function indexSkill(
       try {
         const { data: existingLesson } = await supabase
           .from("video_lessons")
-          .select("video_id, model")
+          .select("video_id, model, generation_status, sections, summary")
           .eq("video_id", video.video_id)
           .maybeSingle();
+        const existingLessonRow = existingLesson as {
+          video_id: string;
+          model: string;
+          generation_status?: string;
+          sections?: LessonSection[];
+          summary?: string | null;
+        } | null;
+
+        // Regenerate when: no row exists, model changed, or previous run failed.
+        // A failed row with the current model is retried; its existing sections
+        // are preserved so the batch generator can resume rather than restart.
         const needsRegen =
-          !existingLesson ||
-          (existingLesson as { model: string } | null)?.model !== CURRENT_LESSON_MODEL;
+          !existingLessonRow ||
+          existingLessonRow.model !== CURRENT_LESSON_MODEL ||
+          existingLessonRow.generation_status === "failed";
+
         if (needsRegen) {
           const allowedTimestamps =
             chapters.length > 0
@@ -548,9 +525,12 @@ async function indexSkill(
               const { buildWindows } = await import("@/lib/lesson-generation");
               const windowsTotal = buildWindows(lessonChunks).length;
 
-              // Initialize or reset progress tracking in video_lessons
-              const { error: initError } = await supabase.from("video_lessons").upsert(
-                {
+              // Initialize or reset progress tracking in video_lessons.
+              // New rows get a full insert; existing rows are updated in place
+              // so previously-generated sections and summary are preserved.
+              const isModelChange = !!existingLessonRow && existingLessonRow.model !== CURRENT_LESSON_MODEL;
+              if (!existingLessonRow) {
+                const { error: initError } = await supabase.from("video_lessons").insert({
                   video_id: video.video_id,
                   sections: [],
                   summary: null,
@@ -559,12 +539,40 @@ async function indexSkill(
                   next_window_index: 0,
                   generation_status: "processing",
                   generation_error: null,
-                },
-                { onConflict: "video_id" }
-              );
-              if (initError) {
-                console.error(`[tutorial-index] Lesson init failed for ${video.video_id}:`, initError);
-                continue;
+                });
+                if (initError) {
+                  console.error(`[tutorial-index] Lesson init failed for ${video.video_id}:`, initError);
+                  continue;
+                }
+              } else if (isModelChange) {
+                const { error: initError } = await supabase.from("video_lessons").update({
+                  sections: [],
+                  summary: null,
+                  model: CURRENT_LESSON_MODEL,
+                  windows_total: windowsTotal,
+                  next_window_index: 0,
+                  generation_status: "processing",
+                  generation_error: null,
+                }).eq("video_id", video.video_id);
+                if (initError) {
+                  console.error(`[tutorial-index] Lesson reset failed for ${video.video_id}:`, initError);
+                  continue;
+                }
+              } else {
+                // Retrying a failed or stalled row — preserve existing content
+                const { error: initError } = await supabase
+                  .from("video_lessons")
+                  .update({
+                    windows_total: windowsTotal,
+                    next_window_index: 0,
+                    generation_status: "processing",
+                    generation_error: null,
+                  })
+                  .eq("video_id", video.video_id);
+                if (initError) {
+                  console.error(`[tutorial-index] Lesson retry init failed for ${video.video_id}:`, initError);
+                  continue;
+                }
               }
 
               const t0 = Date.now();
@@ -576,7 +584,8 @@ async function indexSkill(
                 chunks: lessonChunks,
                 startWindowIndex: 0,
                 batchSize: LESSON_BATCH_SIZE,
-                existingSections: [],
+                existingSections: (existingLessonRow?.sections ?? []) as LessonSection[],
+                existingSummary: existingLessonRow?.summary ?? null,
               });
               lessonGenerateMs += Date.now() - t0;
 
@@ -610,20 +619,73 @@ async function indexSkill(
                 }
               } else {
                 // Batch returned null — mark as failed
-                await supabase.from("video_lessons").update({
+                const { error: failError } = await supabase.from("video_lessons").update({
                   generation_status: "failed",
                   generation_error: "Batch returned no sections",
                 }).eq("video_id", video.video_id);
+                if (failError) {
+                  console.error(`[tutorial-index] Lesson failed update (lost claim) for ${video.video_id}:`, failError);
+                }
               }
             }
           }
         }
       } catch (err) {
         console.error(`[tutorial-index] Lesson generation failed for ${video.video_id}:`, err);
-        await supabase.from("video_lessons").update({
+        const { error: failError } = await supabase.from("video_lessons").update({
           generation_status: "failed",
           generation_error: err instanceof Error ? err.message : String(err),
         }).eq("video_id", video.video_id);
+        if (failError) {
+          console.error(`[tutorial-index] Lesson failed update (lost claim) for ${video.video_id}:`, failError);
+        }
+      }
+    }
+
+    // --- Best-effort embeddings — run AFTER lesson init so cron timeouts
+    //     during embedding do not prevent lesson rows from being created ---
+    if (chapters.length > 0) {
+      try {
+        const chapterLabels = chapters.map((c) => c.label);
+        const chapterEmbeddings = await embedTexts(chapterLabels);
+        for (let i = 0; i < chapters.length; i++) {
+          const emb = chapterEmbeddings[i];
+          if (!emb) continue;
+          const truncated = emb.length > 1536 ? emb.slice(0, 1536) : emb;
+          const { error: updateError } = await supabase
+            .from("tutorial_chapters")
+            .update({ label_embedding: truncated })
+            .eq("video_id", video.video_id)
+            .eq("start_seconds", chapters[i].start_seconds);
+          if (updateError) {
+            console.warn(`[tutorial-index] Chapter embedding update failed for ${video.video_id} @${chapters[i].start_seconds}s:`, updateError.message);
+          }
+        }
+      } catch (err) {
+        console.warn(`[tutorial-index] Chapter embedding best-effort failed for ${video.video_id}, chapters persisted without embeddings:`, (err as Error).message);
+      }
+    }
+
+    if (transcriptChunks.length > 0) {
+      try {
+        const chunkTexts = transcriptChunks.map((c) => c.text);
+        const chunkEmbeddings = await embedTexts(chunkTexts);
+        for (let i = 0; i < transcriptChunks.length; i++) {
+          const emb = chunkEmbeddings[i];
+          if (!emb) continue;
+          const truncated = emb.length > 1536 ? emb.slice(0, 1536) : emb;
+          const { error: updateError } = await supabase
+            .from("tutorial_chunks")
+            .update({ embedding: truncated })
+            .eq("video_id", video.video_id)
+            .eq("start_seconds", transcriptChunks[i].start_seconds)
+            .eq("skill_tag", skill);
+          if (updateError) {
+            console.warn(`[tutorial-index] Chunk embedding update failed for ${video.video_id} @${transcriptChunks[i].start_seconds}s:`, updateError.message);
+          }
+        }
+      } catch (err) {
+        console.warn(`[tutorial-index] Chunk embedding best-effort failed for ${video.video_id}, chunks persisted without embeddings:`, (err as Error).message);
       }
     }
   }
@@ -641,13 +703,14 @@ async function indexSkill(
         .select("video_id, model, generation_status")
         .in("video_id", candidateIds);
       const lessonsMap = new Map(
-        (existingLessonsRows ?? []).map((r: { video_id: string; model: string; generation_status?: string }) => [r.video_id, r]),
+        (existingLessonsRows ?? []).map((r: { video_id: string; model: string; generation_status?: string; sections?: LessonSection[]; summary?: string | null }) => [r.video_id, r]),
       );
       const toRegen = allCandidates.filter((v) => {
         const m = lessonsMap.get(v.video_id);
         // Skip if currently being processed by lesson-step cron
         if (m && (m as { generation_status?: string }).generation_status === "processing") return false;
-        return !m || m.model !== CURRENT_LESSON_MODEL;
+        // Regenerate when missing, stale model, or previous run failed
+        return !m || m.model !== CURRENT_LESSON_MODEL || m.generation_status === "failed";
       });
       for (const video of toRegen) {
         try {
@@ -693,9 +756,16 @@ async function indexSkill(
 
           const windowsTotal = (await import("@/lib/lesson-generation")).buildWindows(lessonChunks).length;
 
-          // Initialize or reset progress tracking
-          const { error: initError } = await supabase.from("video_lessons").upsert(
-            {
+          // Initialize or reset progress tracking.
+          // New rows get a full insert; existing rows are updated in place
+          // so previously-generated sections and summary are preserved.
+          const existingLessonForVideo = lessonsMap.get(video.video_id);
+          const isModelChange =
+            !!existingLessonForVideo &&
+            existingLessonForVideo.model !== CURRENT_LESSON_MODEL;
+
+          if (!existingLessonForVideo) {
+            const { error: initError } = await supabase.from("video_lessons").insert({
               video_id: video.video_id,
               sections: [],
               summary: null,
@@ -704,12 +774,40 @@ async function indexSkill(
               next_window_index: 0,
               generation_status: "processing",
               generation_error: null,
-            },
-            { onConflict: "video_id" }
-          );
-          if (initError) {
-            console.error(`[tutorial-index] Backfill lesson init failed for ${video.video_id}:`, initError);
-            continue;
+            });
+            if (initError) {
+              console.error(`[tutorial-index] Backfill lesson init failed for ${video.video_id}:`, initError);
+              continue;
+            }
+          } else if (isModelChange) {
+            const { error: initError } = await supabase.from("video_lessons").update({
+              sections: [],
+              summary: null,
+              model: CURRENT_LESSON_MODEL,
+              windows_total: windowsTotal,
+              next_window_index: 0,
+              generation_status: "processing",
+              generation_error: null,
+            }).eq("video_id", video.video_id);
+            if (initError) {
+              console.error(`[tutorial-index] Backfill lesson reset failed for ${video.video_id}:`, initError);
+              continue;
+            }
+          } else {
+            // Retrying a failed or stalled row — preserve existing content
+            const { error: initError } = await supabase
+              .from("video_lessons")
+              .update({
+                windows_total: windowsTotal,
+                next_window_index: 0,
+                generation_status: "processing",
+                generation_error: null,
+              })
+              .eq("video_id", video.video_id);
+            if (initError) {
+              console.error(`[tutorial-index] Backfill lesson retry init failed for ${video.video_id}:`, initError);
+              continue;
+            }
           }
 
           const t0 = Date.now();
@@ -721,7 +819,8 @@ async function indexSkill(
             chunks: lessonChunks,
             startWindowIndex: 0,
             batchSize: LESSON_BATCH_SIZE,
-            existingSections: [],
+            existingSections: (existingLessonForVideo?.sections as LessonSection[] | undefined) ?? [],
+            existingSummary: existingLessonForVideo?.summary ?? null,
           });
           lessonGenerateMs += Date.now() - t0;
 
@@ -749,17 +848,25 @@ async function indexSkill(
             );
             if (!lessonError) totalLessons += 1;
           } else {
-            await supabase.from("video_lessons").update({
+            const { error: failError } = await supabase.from("video_lessons").update({
               generation_status: "failed",
               generation_error: "Batch returned no sections",
-            }).eq("video_id", video.video_id);
+            }).eq("video_id", video.video_id)
+              .eq("generation_status", "processing");
+            if (failError) {
+              console.error(`[tutorial-index] Backfill lesson failed update (lost claim) for ${video.video_id}:`, failError);
+            }
           }
         } catch (err) {
           console.error(`[tutorial-index] Backfill lesson failed for ${video.video_id}:`, err);
-          await supabase.from("video_lessons").update({
+          const { error: failError } = await supabase.from("video_lessons").update({
             generation_status: "failed",
             generation_error: err instanceof Error ? err.message : String(err),
-          }).eq("video_id", video.video_id);
+          }).eq("video_id", video.video_id)
+            .eq("generation_status", "processing");
+          if (failError) {
+            console.error(`[tutorial-index] Backfill lesson failed update (lost claim) for ${video.video_id}:`, failError);
+          }
         }
       }
     }
