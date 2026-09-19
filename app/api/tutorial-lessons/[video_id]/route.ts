@@ -61,6 +61,13 @@ export async function GET(
   }
 
   const row = data as VideoLessonRow;
+  if (row.generation_status === "failed") {
+    const reason = row.generation_error ?? "Unknown generation failure";
+    return NextResponse.json(
+      { error: "Lesson generation failed", status: row.generation_status, reason },
+      { status: 500 }
+    );
+  }
   if (row.generation_status !== "completed") {
     const reason = row.generation_error ?? `generation_status=${row.generation_status ?? "missing"}`;
     return NextResponse.json(
