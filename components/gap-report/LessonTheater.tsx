@@ -160,7 +160,8 @@ export function LessonTheater({
       if (res.status === 202) {
         const j = (await res.json().catch(() => ({}))) as { error?: string; reason?: string };
         const msg = j.error ?? j.reason ?? "Notes are still being generated";
-        lessonErrorCache.set(tutorial.video_id, msg);
+        // Do not cache 202 — the lesson may complete on a subsequent cron run,
+        // so we want the next open to refetch rather than show a stale message.
         setLessonError(msg);
         setLesson(null);
         return;
