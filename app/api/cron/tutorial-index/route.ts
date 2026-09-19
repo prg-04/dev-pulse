@@ -4,9 +4,10 @@ import { SKILLS_DICTIONARY } from "@/lib/skills-dictionary";
 import { embed, embedMany } from "ai";
 import { fetchTranscript, YoutubeTranscriptError } from "youtube-transcript";
 import {
-  buildTranscriptFromChunks,
   CURRENT_LESSON_MODEL,
-  generateLessonForVideo,
+  generateLessonBatch,
+  LESSON_BATCH_SIZE,
+  WINDOW_CHAR_BUDGET,
 } from "@/lib/lesson-generation";
 
 export const runtime = "nodejs";
@@ -230,19 +231,19 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   const { createEmbeddingModel } = await import("@/lib/ai/provider");
   const model = await createEmbeddingModel();
-  const BATCH = 8;
+  const BATCH = 4;
   const all: number[][] = [];
   for (let i = 0; i < texts.length; i += BATCH) {
     const batch = texts.slice(i, i + BATCH);
-    let lastErr: unknown = null;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         if (batch.length === 1) {
           const { embedding } = await embed({ model, value: batch[0] });
-          all.push(embedding);
+          // DB vector is 1536; gemini-embedding-001 returns 3072 — truncate to 1536 for pgvector
+          all.push(embedding.length > 1536 ? embedding.slice(0, 1536) : embedding);
         } else {
           const { embeddings } = await embedMany({ model, values: batch });
-          all.push(...embeddings);
+          for (const e of embeddings) all.push(e.length > 1536 ? e.slice(0, 1536) : e);
         }
         break;
       } catch (e: unknown) {
@@ -252,13 +253,12 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
           const delay = 35000 + Math.random() * 5000;
           console.warn(`[tutorial-index] embed quota hit batch ${Math.floor(i / BATCH) + 1}, retry ${attempt + 1}/3 after ${Math.round(delay)}ms`);
           await new Promise((r) => setTimeout(r, delay));
-          lastErr = e;
           continue;
         }
         throw e;
       }
     }
-    if (i + BATCH < texts.length) await new Promise((r) => setTimeout(r, 2200));
+    if (i + BATCH < texts.length) await new Promise((r) => setTimeout(r, 5000));
   }
   return all;
 }
@@ -320,7 +320,7 @@ async function hasGenerateQuotaForVideo(
   lessonChunks: { start_seconds: number; chunk_text: string }[],
 ): Promise<boolean> {
   if (!supabase) return true;
-  const WINDOW_CHAR_BUDGET = 6000;
+  // Estimate total windows for this video using the shared budget constant.
   const sorted = [...lessonChunks].sort((a, b) => a.start_seconds - b.start_seconds);
   let windows = 0;
   let currentChars = 0;
@@ -336,7 +336,10 @@ async function hasGenerateQuotaForVideo(
   }
   if (currentLen > 0) windows += 1;
   const { generate_calls } = await getTodayUsage(supabase);
-  return generate_calls + windows <= DAILY_GENERATE_LIMIT;
+  // We only need enough quota for the first batch; remaining windows are
+  // processed by the lesson-step cron on subsequent runs.
+  const windowsNeeded = Math.max(1, Math.min(windows, LESSON_BATCH_SIZE));
+  return generate_calls + windowsNeeded <= DAILY_GENERATE_LIMIT;
 }
 
 // --- Per-skill indexing ---
@@ -413,31 +416,47 @@ async function indexSkill(
   for (let vi = 0; vi < newVideos.length; vi++) {
     const video = newVideos[vi];
     if (vi > 0) await new Promise((r) => setTimeout(r, 1800));
-    // --- Chapters ---
+    // --- Chapters — decoupled persistence: chunks first, embeddings best-effort ---
     const chapters = parseChapters(video.description);
     if (chapters.length > 0) {
+      // 1. Persist chapters immediately without embeddings (embedding may be null if quota fails)
       try {
-        const chapterLabels = chapters.map((c) => c.label);
-        const chapterEmbeddings = await embedTexts(chapterLabels);
-
-        const chapterRows = chapters.map((ch, idx) => ({
+        const chapterRowsWithoutEmbedding = chapters.map((ch) => ({
           video_id: video.video_id,
           start_seconds: ch.start_seconds,
           label: ch.label,
-          label_embedding: chapterEmbeddings[idx],
+          label_embedding: null as unknown as number[],
         }));
-
         const { error: chapterError } = await supabase
           .from("tutorial_chapters")
-          .upsert(chapterRows, { onConflict: "video_id,start_seconds" });
-
+          .upsert(chapterRowsWithoutEmbedding, { onConflict: "video_id,start_seconds" });
         if (chapterError) {
-          console.error(`[tutorial-index] Chapter upsert failed for ${video.video_id}:`, chapterError);
+          console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, chapterError);
         } else {
           totalChapters += chapters.length;
         }
       } catch (err) {
-        console.error(`[tutorial-index] Chapter embed failed for ${video.video_id}:`, err);
+        console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, err);
+      }
+      // 2. Best-effort embedding update — 429 no longer blocks persistence
+      try {
+        const chapterLabels = chapters.map((c) => c.label);
+        const chapterEmbeddings = await embedTexts(chapterLabels);
+        for (let i = 0; i < chapters.length; i++) {
+          const emb = chapterEmbeddings[i];
+          if (!emb) continue;
+          const truncated = emb.length > 1536 ? emb.slice(0, 1536) : emb;
+          const { error: updateError } = await supabase
+            .from("tutorial_chapters")
+            .update({ label_embedding: truncated })
+            .eq("video_id", video.video_id)
+            .eq("start_seconds", chapters[i].start_seconds);
+          if (updateError) {
+            console.warn(`[tutorial-index] Chapter embedding update failed for ${video.video_id} @${chapters[i].start_seconds}s:`, updateError.message);
+          }
+        }
+      } catch (err) {
+        console.warn(`[tutorial-index] Chapter embedding best-effort failed for ${video.video_id}, chapters persisted without embeddings:`, (err as Error).message);
       }
     }
 
@@ -458,11 +477,9 @@ async function indexSkill(
     }
 
     if (transcriptChunks.length > 0) {
+      // 1. Persist chunks immediately with null embedding — lesson generation uses chunk_text, not embeddings
       try {
-        const chunkTexts = transcriptChunks.map((c) => c.text);
-        const chunkEmbeddings = await embedTexts(chunkTexts);
-
-        const chunkRows = transcriptChunks.map((chunk, idx) => ({
+        const chunkRowsWithoutEmbedding = transcriptChunks.map((chunk) => ({
           video_id: video.video_id,
           video_title: video.title,
           channel_name: video.channel_name,
@@ -471,20 +488,39 @@ async function indexSkill(
           skill_tag: skill,
           start_seconds: chunk.start_seconds,
           chunk_text: chunk.text,
-          embedding: chunkEmbeddings[idx],
+          embedding: null as unknown as number[],
         }));
-
         const { error: chunkError } = await supabase
           .from("tutorial_chunks")
-          .upsert(chunkRows, { onConflict: "video_id,start_seconds,skill_tag" });
-
+          .upsert(chunkRowsWithoutEmbedding, { onConflict: "video_id,start_seconds,skill_tag" });
         if (chunkError) {
-          console.error(`[tutorial-index] Chunk upsert failed for ${video.video_id}:`, chunkError);
+          console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, chunkError);
         } else {
           totalChunks += transcriptChunks.length;
         }
       } catch (err) {
-        console.error(`[tutorial-index] Chunk embed failed for ${video.video_id}:`, err);
+        console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, err);
+      }
+      // 2. Best-effort embedding update — quota 429 no longer blocks lesson generation
+      try {
+        const chunkTexts = transcriptChunks.map((c) => c.text);
+        const chunkEmbeddings = await embedTexts(chunkTexts);
+        for (let i = 0; i < transcriptChunks.length; i++) {
+          const emb = chunkEmbeddings[i];
+          if (!emb) continue;
+          const truncated = emb.length > 1536 ? emb.slice(0, 1536) : emb;
+          const { error: updateError } = await supabase
+            .from("tutorial_chunks")
+            .update({ embedding: truncated })
+            .eq("video_id", video.video_id)
+            .eq("start_seconds", transcriptChunks[i].start_seconds)
+            .eq("skill_tag", skill);
+          if (updateError) {
+            console.warn(`[tutorial-index] Chunk embedding update failed for ${video.video_id} @${transcriptChunks[i].start_seconds}s:`, updateError.message);
+          }
+        }
+      } catch (err) {
+        console.warn(`[tutorial-index] Chunk embedding best-effort failed for ${video.video_id}, chunks persisted without embeddings:`, (err as Error).message);
       }
     }
 
@@ -512,77 +548,113 @@ async function indexSkill(
             const hasQuota = await hasGenerateQuotaForVideo(supabase, lessonChunks);
             if (!hasQuota) {
               console.warn(
-                `[tutorial-index] Skipping lesson for ${video.video_id}: daily generate quota exhausted (90/day)`,
+                `[tutorial-index] Skipping lesson for ${video.video_id}: daily generate quota exhausted`,
               );
             } else {
-              const windowsForMetric = await (async () => {
-                const sorted = [...lessonChunks].sort((a, b) => a.start_seconds - b.start_seconds);
-                let w = 0;
-                let cur = 0;
-                let len = 0;
-                for (const c of sorted) {
-                  if (len > 0 && cur + c.chunk_text.length > 6000) { w += 1; cur = 0; len = 0; }
-                  cur += c.chunk_text.length; len += 1;
-                }
-                if (len > 0) w += 1;
-                return w;
-              })();
+              // Build windows to determine total count for progress tracking
+              const { buildWindows } = await import("@/lib/lesson-generation");
+              const windowsTotal = buildWindows(lessonChunks).length;
+
+              // Initialize or reset progress tracking in video_lessons
+              const { error: initError } = await supabase.from("video_lessons").upsert(
+                {
+                  video_id: video.video_id,
+                  sections: [],
+                  summary: null,
+                  model: CURRENT_LESSON_MODEL,
+                  windows_total: windowsTotal,
+                  next_window_index: 0,
+                  generation_status: "processing",
+                  generation_error: null,
+                },
+                { onConflict: "video_id" }
+              );
+              if (initError) {
+                console.error(`[tutorial-index] Lesson init failed for ${video.video_id}:`, initError);
+                continue;
+              }
+
               const t0 = Date.now();
-              const lesson = await generateLessonForVideo({
+              const lesson = await generateLessonBatch({
                 videoId: video.video_id,
                 videoTitle: video.title,
                 channelName: video.channel_name,
                 allowedTimestamps,
                 chunks: lessonChunks,
+                startWindowIndex: 0,
+                batchSize: LESSON_BATCH_SIZE,
+                existingSections: [],
               });
               lessonGenerateMs += Date.now() - t0;
+
               if (lesson) {
-                await incrementGenerateUsage(supabase, windowsForMetric);
+                // Increment usage by the number of windows actually processed in this batch
+                const windowsProcessed = Math.min(LESSON_BATCH_SIZE, windowsTotal);
+                await incrementGenerateUsage(supabase, windowsProcessed);
                 if (lesson.stats) {
                   console.info(
-                    `[tutorial-index] Lesson stats for ${video.video_id}: ${JSON.stringify(lesson.stats)}`,
+                    `[tutorial-index] Lesson batch stats for ${video.video_id}: ${JSON.stringify(lesson.stats)}`,
                   );
                 }
+                const isComplete = LESSON_BATCH_SIZE >= windowsTotal;
                 const { error: lessonError } = await supabase.from("video_lessons").upsert(
                   {
                     video_id: video.video_id,
                     sections: lesson.sections,
-                    summary: lesson.summary,
+                    summary: isComplete ? lesson.summary : null,
                     model: CURRENT_LESSON_MODEL,
+                    windows_total: windowsTotal,
+                    next_window_index: Math.min(LESSON_BATCH_SIZE, windowsTotal),
+                    generation_status: isComplete ? "completed" : "processing",
+                    generation_error: null,
                   },
                   { onConflict: "video_id" }
                 );
-              if (lessonError) {
-                console.error(`[tutorial-index] Lesson upsert failed for ${video.video_id}:`, lessonError);
+                if (lessonError) {
+                  console.error(`[tutorial-index] Lesson upsert failed for ${video.video_id}:`, lessonError);
+                } else {
+                  totalLessons += 1;
+                }
               } else {
-                totalLessons += 1;
+                // Batch returned null — mark as failed
+                await supabase.from("video_lessons").update({
+                  generation_status: "failed",
+                  generation_error: "Batch returned no sections",
+                }).eq("video_id", video.video_id);
               }
-            }
             }
           }
         }
       } catch (err) {
         console.error(`[tutorial-index] Lesson generation failed for ${video.video_id}:`, err);
+        await supabase.from("video_lessons").update({
+          generation_status: "failed",
+          generation_error: err instanceof Error ? err.message : String(err),
+        }).eq("video_id", video.video_id);
       }
     }
   }
 
   // --- Backfill: regenerate stale lessons and fill missing (Fix 1 + Fix 2 backfill) ---
   // Covers videos indexed before Feature 5, failed generations, and stale model versions.
+  // Uses the same incremental approach as the main loop — processes only the first
+  // batch per video; the lesson-step cron picks up the rest.
   try {
     const allCandidates = selected;
     const candidateIds = allCandidates.map((v) => v.video_id);
     if (candidateIds.length > 0) {
       const { data: existingLessonsRows } = await supabase
         .from("video_lessons")
-        .select("video_id, model")
+        .select("video_id, model, generation_status")
         .in("video_id", candidateIds);
       const lessonsMap = new Map(
-        (existingLessonsRows ?? []).map((r: { video_id: string; model: string }) => [r.video_id, r.model]),
+        (existingLessonsRows ?? []).map((r: { video_id: string; model: string; generation_status?: string }) => [r.video_id, r]),
       );
       const toRegen = allCandidates.filter((v) => {
         const m = lessonsMap.get(v.video_id);
-        return !m || m !== CURRENT_LESSON_MODEL;
+        // Skip if currently being processed by lesson-step cron
+        if (m && (m as { generation_status?: string }).generation_status === "processing") return false;
+        return !m || m.model !== CURRENT_LESSON_MODEL;
       });
       for (const video of toRegen) {
         try {
@@ -618,7 +690,7 @@ async function indexSkill(
           const hasQuota = await hasGenerateQuotaForVideo(supabase, lessonChunks);
           if (!hasQuota) {
             console.warn(
-              `[tutorial-index] Skipping backfill lesson for ${video.video_id}: daily generate quota exhausted (90/day)`,
+              `[tutorial-index] Skipping backfill lesson for ${video.video_id}: daily generate quota exhausted`,
             );
             continue;
           }
@@ -626,47 +698,75 @@ async function indexSkill(
           const title = chunksForVideo[0]?.video_title ?? video.title;
           const channel = chunksForVideo[0]?.channel_name ?? video.channel_name;
 
-          const windowsForMetric = await (async () => {
-            const sorted = [...lessonChunks].sort((a, b) => a.start_seconds - b.start_seconds);
-            let w = 0;
-            let cur = 0;
-            let len = 0;
-            for (const c of sorted) {
-              if (len > 0 && cur + c.chunk_text.length > 6000) { w += 1; cur = 0; len = 0; }
-              cur += c.chunk_text.length; len += 1;
-            }
-            if (len > 0) w += 1;
-            return w;
-          })();
+          const windowsTotal = (await import("@/lib/lesson-generation")).buildWindows(lessonChunks).length;
+
+          // Initialize or reset progress tracking
+          const { error: initError } = await supabase.from("video_lessons").upsert(
+            {
+              video_id: video.video_id,
+              sections: [],
+              summary: null,
+              model: CURRENT_LESSON_MODEL,
+              windows_total: windowsTotal,
+              next_window_index: 0,
+              generation_status: "processing",
+              generation_error: null,
+            },
+            { onConflict: "video_id" }
+          );
+          if (initError) {
+            console.error(`[tutorial-index] Backfill lesson init failed for ${video.video_id}:`, initError);
+            continue;
+          }
+
           const t0 = Date.now();
-          const lesson = await generateLessonForVideo({
+          const lesson = await generateLessonBatch({
             videoId: video.video_id,
             videoTitle: title,
             channelName: channel,
             allowedTimestamps,
             chunks: lessonChunks,
+            startWindowIndex: 0,
+            batchSize: LESSON_BATCH_SIZE,
+            existingSections: [],
           });
           lessonGenerateMs += Date.now() - t0;
+
           if (lesson) {
-            await incrementGenerateUsage(supabase, windowsForMetric);
+            const windowsProcessed = Math.min(LESSON_BATCH_SIZE, windowsTotal);
+            await incrementGenerateUsage(supabase, windowsProcessed);
             if (lesson.stats) {
               console.info(
-                `[tutorial-index] Backfill lesson stats for ${video.video_id}: ${JSON.stringify(lesson.stats)}`,
+                `[tutorial-index] Backfill lesson batch stats for ${video.video_id}: ${JSON.stringify(lesson.stats)}`,
               );
             }
+            const isComplete = LESSON_BATCH_SIZE >= windowsTotal;
             const { error: lessonError } = await supabase.from("video_lessons").upsert(
               {
                 video_id: video.video_id,
                 sections: lesson.sections,
-                summary: lesson.summary,
+                summary: isComplete ? lesson.summary : null,
                 model: CURRENT_LESSON_MODEL,
+                windows_total: windowsTotal,
+                next_window_index: Math.min(LESSON_BATCH_SIZE, windowsTotal),
+                generation_status: isComplete ? "completed" : "processing",
+                generation_error: null,
               },
               { onConflict: "video_id" }
             );
             if (!lessonError) totalLessons += 1;
+          } else {
+            await supabase.from("video_lessons").update({
+              generation_status: "failed",
+              generation_error: "Batch returned no sections",
+            }).eq("video_id", video.video_id);
           }
         } catch (err) {
           console.error(`[tutorial-index] Backfill lesson failed for ${video.video_id}:`, err);
+          await supabase.from("video_lessons").update({
+            generation_status: "failed",
+            generation_error: err instanceof Error ? err.message : String(err),
+          }).eq("video_id", video.video_id);
         }
       }
     }

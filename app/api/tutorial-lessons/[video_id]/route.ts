@@ -17,6 +17,8 @@ type VideoLessonRow = {
   summary: string | null;
   generated_at: string;
   model: string;
+  generation_status?: string;
+  generation_error?: string | null;
 };
 
 export async function GET(
@@ -47,7 +49,7 @@ export async function GET(
 
   const { data, error } = await service
     .from("video_lessons")
-    .select("video_id, sections, summary, generated_at, model")
+    .select("video_id, sections, summary, generated_at, model, generation_status, generation_error")
     .eq("video_id", parsed.data.video_id)
     .maybeSingle();
 
@@ -59,6 +61,13 @@ export async function GET(
   }
 
   const row = data as VideoLessonRow;
+  if (row.generation_status !== "completed") {
+    const reason = row.generation_error ?? `generation_status=${row.generation_status ?? "missing"}`;
+    return NextResponse.json(
+      { error: "Notes are still being generated", status: row.generation_status, reason },
+      { status: 202 }
+    );
+  }
   return NextResponse.json(
     {
       video_id: row.video_id,
