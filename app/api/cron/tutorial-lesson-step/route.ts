@@ -36,11 +36,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing Supabase env" }, { status: 500 });
   }
 
-  // 1. Find all videos currently being processed
+  // 1. Find all videos currently being processed (cap rows so one invocation
+  //    does not exhaust its timeout on a large backlog)
   const { data: pendingRows, error: pendingError } = await supabase
     .from("video_lessons")
     .select("video_id, sections, summary, windows_total, next_window_index, generation_status, generation_error")
-    .eq("generation_status", "processing");
+    .eq("generation_status", "processing")
+    .limit(LESSON_BATCH_SIZE);
 
   if (pendingError) {
     return NextResponse.json(
