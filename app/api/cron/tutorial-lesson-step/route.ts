@@ -93,13 +93,19 @@ export async function POST(req: Request) {
         }));
 
       if (allowedTimestamps.length === 0 || lessonChunks.length === 0) {
-        await supabase
+        const { error: failError } = await supabase
           .from("video_lessons")
           .update({
             generation_status: "failed",
             generation_error: "No chapters or chunks available for resume",
           })
-          .eq("video_id", row.video_id);
+          .eq("video_id", row.video_id)
+          .eq("generation_status", "processing")
+          .eq("next_window_index", row.next_window_index);
+
+        if (failError) {
+          console.error(`[lesson-step] Failed update (lost claim) for ${row.video_id}:`, failError);
+        }
         results.push({
           video_id: row.video_id,
           status: "failed",
@@ -134,13 +140,19 @@ export async function POST(req: Request) {
       });
 
       if (!result) {
-        await supabase
+        const { error: failError } = await supabase
           .from("video_lessons")
           .update({
             generation_status: "failed",
             generation_error: "Batch returned no sections — all filtered out",
           })
-          .eq("video_id", row.video_id);
+          .eq("video_id", row.video_id)
+          .eq("generation_status", "processing")
+          .eq("next_window_index", row.next_window_index);
+
+        if (failError) {
+          console.error(`[lesson-step] Failed update (lost claim) for ${row.video_id}:`, failError);
+        }
         results.push({
           video_id: row.video_id,
           status: "failed",
@@ -170,7 +182,9 @@ export async function POST(req: Request) {
       const { error: updateError } = await supabase
         .from("video_lessons")
         .update(updateData)
-        .eq("video_id", row.video_id);
+        .eq("video_id", row.video_id)
+        .eq("generation_status", "processing")
+        .eq("next_window_index", row.next_window_index);
 
       if (updateError) {
         console.error(`[lesson-step] Upsert failed for ${row.video_id}:`, updateError);
@@ -193,37 +207,34 @@ export async function POST(req: Request) {
         windows_total: row.windows_total,
       });
 
-      // Also increment ai_daily_usage for windows processed in this batch
+      // Atomically increment ai_daily_usage for windows processed in this batch
       const windowsProcessed = Math.min(LESSON_BATCH_SIZE, row.windows_total - row.next_window_index);
       if (windowsProcessed > 0) {
         const today = new Date().toISOString().slice(0, 10);
-        const { data: existingUsage } = await supabase
-          .from("ai_daily_usage")
-          .select("generate_calls")
-          .eq("usage_date", today)
-          .maybeSingle();
-        const current = (existingUsage as { generate_calls: number } | null)?.generate_calls ?? 0;
-        await supabase
-          .from("ai_daily_usage")
-          .upsert(
-            {
-              usage_date: today,
-              generate_calls: current + windowsProcessed,
-              updated_at: new Date().toISOString(),
-            },
-            { onConflict: "usage_date" }
-          );
+        const { error: rpcError } = await supabase.rpc("increment_generate_calls", {
+          p_usage_date: today,
+          p_delta: windowsProcessed,
+        });
+        if (rpcError) {
+          console.error(`[lesson-step] increment_generate_calls failed for ${row.video_id}:`, rpcError);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[lesson-step] Batch failed for ${row.video_id}:`, msg);
-      await supabase
+      const { error: failError } = await supabase
         .from("video_lessons")
         .update({
           generation_status: "failed",
           generation_error: msg,
         })
-        .eq("video_id", row.video_id);
+        .eq("video_id", row.video_id)
+        .eq("generation_status", "processing")
+        .eq("next_window_index", row.next_window_index);
+
+      if (failError) {
+        console.error(`[lesson-step] Failed update (lost claim) for ${row.video_id}:`, failError);
+      }
       results.push({
         video_id: row.video_id,
         status: "failed",

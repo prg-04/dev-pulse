@@ -296,20 +296,13 @@ async function incrementGenerateUsage(
   inMemoryGenerateCount += windowsUsed;
   const today = new Date().toISOString().slice(0, 10);
   try {
-    const { data: existing } = await supabase
-      .from("ai_daily_usage")
-      .select("generate_calls")
-      .eq("usage_date", today)
-      .maybeSingle();
-    const current = (existing as { generate_calls: number } | null)?.generate_calls ?? 0;
-    await supabase.from("ai_daily_usage").upsert(
-      {
-        usage_date: today,
-        generate_calls: Math.max(current, inMemoryGenerateCount),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "usage_date" },
-    );
+    const { error: rpcError } = await supabase.rpc("increment_generate_calls", {
+      p_usage_date: today,
+      p_delta: windowsUsed,
+    });
+    if (rpcError) {
+      console.error("[tutorial-index] increment_generate_calls failed:", rpcError);
+    }
   } catch {
     // table not yet migrated — in-memory guard still enforces per-run limit
   }
