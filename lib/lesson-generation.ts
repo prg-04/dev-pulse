@@ -28,7 +28,15 @@ export const WINDOW_CHAR_BUDGET = 13000;
 
 // How many windows to process per invocation. 3 windows × ~10s AI latency ≈ 30s,
 // comfortably within Vercel Pro's 60s timeout. Reduce to 1-2 on Hobby tier.
-export const LESSON_BATCH_SIZE = Number(process.env.LESSON_BATCH_SIZE ?? "3");
+// Parsed strictly: empty string, "0", or non-numeric input all fall back to 3
+// so a bad env var cannot permanently stall a video in "processing".
+export const LESSON_BATCH_SIZE = (() => {
+  const raw = process.env.LESSON_BATCH_SIZE;
+  if (!raw) return 3;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 3;
+  return parsed;
+})();
 
 const MAX_SECTIONS_PER_VIDEO = 40; // keep in sync with LessonOutputSchema's sections max below
 
@@ -643,6 +651,7 @@ export async function generateLessonBatch(params: {
   batchSize: number;
   existingSections?: LessonSection[];
   existingStats?: LessonGenerationResult['stats'];
+  existingSummary?: string | null;
 }): Promise<LessonGenerationResult | null> {
   const {
     videoId,
@@ -707,7 +716,7 @@ export async function generateLessonBatch(params: {
   const modelId = meta.model;
 
   const allSections: LessonSection[] = [...existingSections];
-  const summaries: string[] = [];
+  const summaries: string[] = params.existingSummary ? [params.existingSummary] : [];
 
   let windowsSucceeded = existingStats?.windowsSucceeded ?? 0;
   let windowsSkipped = existingStats?.windowsSkipped ?? 0;
