@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextRequest, NextResponse } from "next/server";
 
 // ---------------------------------------------------------------------------
 // server-only is a build-time guard; silence it in the test environment
@@ -10,7 +11,8 @@ vi.mock("server-only", () => ({}));
 // ---------------------------------------------------------------------------
 let maybeSingleMock: ReturnType<typeof vi.fn>;
 
-const mockServiceRole = {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockServiceRole: any = {
   from: vi.fn(() => ({
     select: vi.fn(() => ({
       eq: vi.fn(() => ({
@@ -62,7 +64,7 @@ describe("GET /api/tutorial-lessons/[video_id]", () => {
       error: null,
     });
 
-    const req = new Request("http://localhost/api/tutorial-lessons/ABCDEFGHIJK");
+    const req = new Request("http://localhost/api/tutorial-lessons/ABCDEFGHIJK") as unknown as NextRequest;
     const res = await GET(req, { params: Promise.resolve({ video_id: "ABCDEFGHIJK" }) });
 
     expect(res.status).toBe(500);
@@ -87,7 +89,7 @@ describe("GET /api/tutorial-lessons/[video_id]", () => {
       error: null,
     });
 
-    const req = new Request("http://localhost/api/tutorial-lessons/KJIHGFEDCBA");
+    const req = new Request("http://localhost/api/tutorial-lessons/KJIHGFEDCBA") as unknown as NextRequest;
     const res = await GET(req, { params: Promise.resolve({ video_id: "KJIHGFEDCBA" }) });
 
     expect(res.status).toBe(202);
@@ -111,7 +113,7 @@ describe("GET /api/tutorial-lessons/[video_id]", () => {
       error: null,
     });
 
-    const req = new Request("http://localhost/api/tutorial-lessons/12345678901");
+    const req = new Request("http://localhost/api/tutorial-lessons/12345678901") as unknown as NextRequest;
     const res = await GET(req, { params: Promise.resolve({ video_id: "12345678901" }) });
 
     expect(res.status).toBe(200);

@@ -72,17 +72,33 @@ export async function POST(req: Request) {
   for (const row of pending) {
     try {
       // 2. Re-fetch allowed timestamps from persisted chapters/chunks
-      const { data: chapters } = await supabase
+      const { data: chapters, error: chaptersError } = await supabase
         .from("tutorial_chapters")
         .select("start_seconds")
         .eq("video_id", row.video_id)
         .order("start_seconds");
 
-      const { data: chunks } = await supabase
+      const { data: chunks, error: chunksError } = await supabase
         .from("tutorial_chunks")
         .select("start_seconds, chunk_text")
         .eq("video_id", row.video_id)
         .order("start_seconds");
+
+      if (chaptersError || chunksError) {
+        console.error(
+          `[lesson-step] Source query failed for ${row.video_id}:`,
+          chaptersError ?? chunksError
+        );
+        results.push({
+          video_id: row.video_id,
+          status: "retry",
+          sections_added: 0,
+          next_window_index: row.next_window_index,
+          windows_total: row.windows_total,
+          error: chaptersError?.message ?? chunksError?.message ?? "Source query failed",
+        });
+        continue;
+      }
 
       const chapterStarts = (chapters ?? []).map((c) => c.start_seconds);
       const chunkStarts = (chunks ?? []).map((c) => c.start_seconds);
