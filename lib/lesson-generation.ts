@@ -7,7 +7,36 @@ import { generateObject, generateText } from "ai";
 // Zod schemas — structured output contract for lesson notes
 // ---------------------------------------------------------------------------
 
-export const CURRENT_LESSON_MODEL = "gemini-3.6-flash-concept-v3"; // v3: tail-window no longer merges, chapter fallback to window.startSeconds, transcript truncation warned, per-video stats added
+// Chosen deliberately for sustained weekly cron use (up to 10 skills × 3 videos ×
+// dozens of windows per video). Tradeoffs considered:
+//   - openai/gpt-4o-mini: $0.15/$0.60 per 1M tokens, 128k context, 10k RPM on
+//     paid tier. Cheapest OpenAI option with proven structured-output reliability
+//     via the Vercel AI SDK. At ~1100 AI calls/week this costs ~$0.20-0.50/week.
+//   - deepseek-chat: cheaper per-token but 64k context and less proven at
+//     structuredObject() over long prompts.
+//   - gemini-2.5-flash: generous free tier but higher latency variance.
+//
+// Locked to openai/gpt-4o-mini to stop env-driven model swapping. If a provider
+// change is needed, update this constant and the AI_MODEL env var together, then
+// regenerate all video_lessons rows (model column tracks the producer).
+export const CURRENT_LESSON_MODEL = "openai/gpt-4o-mini";
+
+// Characters per generation window. Increased from 10000 → 13000 to reduce total
+// window count for long videos (fewer AI calls = faster completion, lower quota
+// burn). 13000 chars ≈ 3250-4000 tokens, well within 128k context.
+export const WINDOW_CHAR_BUDGET = 13000;
+
+// How many windows to process per invocation. 3 windows × ~10s AI latency ≈ 30s,
+// comfortably within Vercel Pro's 60s timeout. Reduce to 1-2 on Hobby tier.
+// Parsed strictly: empty string, "0", or non-numeric input all fall back to 3
+// so a bad env var cannot permanently stall a video in "processing".
+export const LESSON_BATCH_SIZE = (() => {
+  const raw = process.env.LESSON_BATCH_SIZE;
+  if (!raw) return 3;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 3;
+  return parsed;
+})();
 
 const MAX_SECTIONS_PER_VIDEO = 40; // keep in sync with LessonOutputSchema's sections max below
 
@@ -167,14 +196,13 @@ export function filterToAllowedTimestamps(
 // this replaces that with per-window generation instead.
 // ---------------------------------------------------------------------------
 
-export const WINDOW_CHAR_BUDGET = 6000; // per-call transcript budget, leaves headroom vs a flat 8000 cap
 /**
- * Soft target, no longer a hard truncation ceiling.
+ * Retained for backward-compat with quota estimation in cron routes.
  * buildWindows() now produces as many windows as needed (one per WINDOW_CHAR_BUDGET).
  * Cost control is via DAILY_GENERATE_LIMIT / hasGenerateQuotaForVideo / ai_daily_usage,
  * not by collapsing tail windows. See Fix #1 (2026-09-16).
  */
-export const MAX_WINDOWS_PER_VIDEO = 8; // retained for backward-compat with hasGenerateQuotaForVideo estimation; no longer merges tail in buildWindows
+export const MAX_WINDOWS_PER_VIDEO = 8; // no longer merges tail in buildWindows
 export const LEGACY_MAX_WINDOWS_PER_VIDEO = 8;
 
 // --- Content-quality guards (sponsor/music, verbatim, code shape) ---
@@ -386,7 +414,7 @@ async function generateForWindow(params: {
       system: LESSON_SYSTEM_PROMPT,
       prompt: userPrompt,
       schema: LessonWindowOutputSchema,
-      maxOutputTokens: 2500,
+      maxOutputTokens: 4000,
     });
     return { data: result.object, fallbackUsed, transcriptTruncated };
   } catch (goErr) {
@@ -401,7 +429,7 @@ async function generateForWindow(params: {
         prompt:
           userPrompt +
           "\n\nReturn JSON only with keys summary (string|null) and sections (array of {start_seconds, heading, key_points, code_example}). No markdown, no explanation.",
-        maxOutputTokens: 2500,
+        maxOutputTokens: 4000,
       });
       const match = text.match(/\{[\s\S]*\}/);
       if (!match)
@@ -595,6 +623,204 @@ export async function generateLessonForVideo(params: {
 
   return {
     summary: summaries[0] ? summaries[0].slice(0, 600) : null,
+    sections: finalSections,
+    stats,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Incremental batch generation — for resumable, timeout-safe lesson generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Process a small batch of windows for a video, accumulating onto any
+ * sections/stats from prior batches. Post-processing (timestamp filtering,
+ * narration filtering, verbatim filtering, dedup) runs on the combined set
+ * after each batch so the returned sections are always in final form.
+ *
+ * Callers (cron routes) persist the returned sections and nextWindowIndex
+ * after each batch, enabling resumption after timeout or quota exhaustion.
+ */
+export async function generateLessonBatch(params: {
+  videoId: string;
+  videoTitle: string;
+  channelName: string;
+  allowedTimestamps: number[];
+  chunks: TranscriptChunk[];
+  startWindowIndex: number;
+  batchSize: number;
+  existingSections?: LessonSection[];
+  existingStats?: LessonGenerationResult['stats'];
+  existingSummary?: string | null;
+}): Promise<LessonGenerationResult | null> {
+  const {
+    videoId,
+    videoTitle,
+    channelName,
+    allowedTimestamps,
+    chunks,
+    startWindowIndex,
+    batchSize,
+    existingSections = [],
+    existingStats,
+  } = params;
+
+  if (allowedTimestamps.length === 0) {
+    console.warn(`[lesson-generation] No allowed timestamps for ${videoId}, skipping`);
+    return null;
+  }
+  if (chunks.length === 0) {
+    console.warn(`[lesson-generation] No transcript chunks for ${videoId}, skipping`);
+    return null;
+  }
+
+  const windows = buildWindows(chunks);
+  const windowsTotal = windows.length;
+
+  if (startWindowIndex >= windowsTotal) {
+    // Nothing left to process — return accumulated state as-is
+    return {
+      summary: null,
+      sections: existingSections,
+      stats: existingStats ?? {
+        windowsTotal,
+        windowsSucceeded: 0,
+        windowsSkipped: 0,
+        windowsFallbackTimestamp: 0,
+        windowsTruncated: 0,
+        skipReasons: {},
+      },
+    };
+  }
+
+  const batchEnd = Math.min(startWindowIndex + batchSize, windowsTotal);
+
+  // Compute the effective allowed set: original timestamps + any window
+  // startSeconds where no chapter marker falls in that window's range.
+  // This is deterministic and doesn't depend on processing order, so we
+  // compute it once upfront rather than mutating it during the loop.
+  const effectiveAllowed = new Set<number>(allowedTimestamps);
+  for (let w = 0; w < windowsTotal; w++) {
+    const windowChapters = allowedTimestamps.filter(
+      (t) => t >= windows[w].startSeconds && t <= windows[w].endSeconds
+    );
+    if (windowChapters.length === 0) {
+      effectiveAllowed.add(windows[w].startSeconds);
+    }
+  }
+
+  const { createTextModel, getProviderMeta } =
+    await import("@/lib/ai/provider");
+  const model = await createTextModel();
+  const meta = getProviderMeta();
+  const modelId = meta.model;
+
+  const allSections: LessonSection[] = [...existingSections];
+  const summaries: string[] = params.existingSummary ? [params.existingSummary] : [];
+
+  let windowsSucceeded = existingStats?.windowsSucceeded ?? 0;
+  let windowsSkipped = existingStats?.windowsSkipped ?? 0;
+  let windowsFallbackTimestamp = existingStats?.windowsFallbackTimestamp ?? 0;
+  let windowsTruncated = existingStats?.windowsTruncated ?? 0;
+  const skipReasons: Record<string, number> = { ...(existingStats?.skipReasons ?? {}) };
+
+  for (let i = startWindowIndex; i < batchEnd; i++) {
+    const windowLabel =
+      windowsTotal > 1
+        ? `This is part ${i + 1} of ${windowsTotal} of a longer video.`
+        : undefined;
+    const result = await generateForWindow({
+      videoId,
+      videoTitle,
+      channelName,
+      window: windows[i],
+      allowedTimestamps,
+      windowLabel,
+      model,
+    });
+
+    if (!result || !result.data) {
+      windowsSkipped++;
+      const reason = (result as { skipReason?: string })?.skipReason ?? "unknown";
+      skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+      continue;
+    }
+
+    if (result.fallbackUsed) {
+      windowsFallbackTimestamp++;
+      effectiveAllowed.add(windows[i].startSeconds);
+    }
+    if (result.transcriptTruncated) windowsTruncated++;
+    windowsSucceeded++;
+    if (result.data.summary) summaries.push(result.data.summary.trim());
+    allSections.push(...result.data.sections);
+  }
+
+  // Post-processing on the combined accumulated set.
+  // These operations are idempotent on already-validated sections, so
+  // re-running after each batch is safe and ensures the returned sections
+  // are always in their final form.
+  const timestampFiltered = filterToAllowedTimestamps(allSections, effectiveAllowed);
+  if (timestampFiltered.length === 0) {
+    console.warn(
+      `[lesson-generation] All sections for ${videoId} had invented timestamps after batch [${startWindowIndex}-${batchEnd}), dropping entire lesson. Preview: ${formatSectionsPreview(allSections)}`,
+    );
+    return null;
+  }
+
+  const narrationFiltered = filterNarrationPhrasing(timestampFiltered);
+  if (narrationFiltered.length === 0) {
+    console.warn(
+      `[lesson-generation] All sections for ${videoId} dropped after narration-phrase filtering after batch [${startWindowIndex}-${batchEnd})`,
+    );
+    return null;
+  }
+
+  const codeFiltered = filterCodeExampleShape(narrationFiltered);
+  const fullTranscript = chunks.map((c) => c.chunk_text).join(" ");
+  const verbatimFiltered = filterVerbatimCopy(codeFiltered, fullTranscript);
+  if (verbatimFiltered.length === 0) {
+    console.warn(
+      `[lesson-generation] All sections for ${videoId} dropped after verbatim filtering after batch [${startWindowIndex}-${batchEnd})`,
+    );
+    return null;
+  }
+
+  const seen = new Set<number>();
+  const deduped: LessonSection[] = [];
+  const sorted = [...verbatimFiltered].sort(
+    (a, b) => a.start_seconds - b.start_seconds
+  );
+  for (const s of sorted) {
+    if (seen.has(s.start_seconds)) continue;
+    seen.add(s.start_seconds);
+    deduped.push({
+      start_seconds: s.start_seconds,
+      heading: s.heading.trim().slice(0, 120),
+      key_points: s.key_points.map((p) => p.trim().slice(0, 300)).slice(0, 5),
+      code_example: s.code_example
+        ? s.code_example.trim().slice(0, 800)
+        : undefined,
+    });
+  }
+
+  const finalSections = deduped.slice(0, MAX_SECTIONS_PER_VIDEO);
+
+  const stats = {
+    windowsTotal,
+    windowsSucceeded,
+    windowsSkipped,
+    windowsFallbackTimestamp,
+    windowsTruncated,
+    skipReasons,
+  };
+
+  console.info(
+    `[lesson-generation] Batch [${startWindowIndex}-${batchEnd}) for ${videoId} via ${modelId}: ${finalSections.length} sections — succeeded=${windowsSucceeded} skipped=${windowsSkipped} fallback=${windowsFallbackTimestamp} truncated=${windowsTruncated} total=${windowsTotal}`,
+  );
+
+  return {
+    summary: summaries.length > 0 ? summaries[0].slice(0, 600) : null,
     sections: finalSections,
     stats,
   };
