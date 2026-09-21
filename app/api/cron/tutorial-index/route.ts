@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
+import { createYouTubeClient } from "@/lib/youtube/client";
 import { SKILLS_DICTIONARY } from "@/lib/skills-dictionary";
 import { embed, embedMany } from "ai";
 import { fetchTranscript, YoutubeTranscriptError } from "youtube-transcript";
@@ -24,16 +25,6 @@ interface SkillIndexStatus {
   last_error: string | null;
 }
 
-interface YouTubeVideoCandidate {
-  video_id: string;
-  title: string;
-  channel_name: string;
-  view_count: number;
-  duration_seconds: number;
-  published_at: string | null;
-  description: string;
-}
-
 interface ParsedChapter {
   start_seconds: number;
   label: string;
@@ -54,6 +45,30 @@ const CHUNK_DURATION_SECONDS = 60;
 const TITLE_EXCLUDE_PATTERN = /\bin\s+\d+\s*(seconds?|minutes?|mins?)\b/i;
 
 // --- Helpers ---
+
+/** Retry an async function up to `attempts` times with a fixed delay between tries. */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  { attempts = 2, delayMs = 4000 } = {}
+): Promise<T> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (i < attempts - 1) {
+        console.warn(
+          `[tutorial-index] Retry ${i + 1}/${attempts - 1} after error: ${
+            err instanceof Error ? err.message : err
+          }`
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
 function parseISOString(value: string | null): Date {
   if (!value) return new Date(0);
   return new Date(value);
@@ -145,89 +160,7 @@ function chunkTranscript(
   return chunks;
 }
 
-// --- YouTube API ---
-async function searchYouTubeVideos(
-  skill: string,
-  apiKey: string
-): Promise<YouTubeVideoCandidate[]> {
-  const searchUrl = new URL("https://www.googleapis.com/youtube/v3/search");
-  searchUrl.searchParams.set("q", `${skill} complete tutorial course`);
-  searchUrl.searchParams.set("type", "video");
-  searchUrl.searchParams.set("order", "relevance");
-  searchUrl.searchParams.set("publishedAfter", getPublishedAfter());
-  searchUrl.searchParams.set("maxResults", "14");
-  searchUrl.searchParams.set("key", apiKey);
-
-  const searchRes = await fetch(searchUrl.toString());
-  if (!searchRes.ok) {
-    throw new Error(`YouTube search failed: ${searchRes.status}`);
-  }
-
-  const searchData = await searchRes.json();
-  const items = searchData.items ?? [];
-  if (items.length === 0) return [];
-
-  const videoIds = items
-    .map((item: Record<string, unknown>) => {
-      const idObj = item.id as { videoId?: string } | string | undefined;
-      const vid = typeof idObj === "string" ? idObj : idObj?.videoId;
-      return typeof vid === "string" ? vid : null;
-    })
-    .filter((id: string | null): id is string => id !== null);
-
-  if (videoIds.length === 0) return [];
-
-  // Fetch detailed metadata
-  const videosUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
-  videosUrl.searchParams.set("id", videoIds.join(","));
-  videosUrl.searchParams.set("part", "contentDetails,snippet,statistics");
-  videosUrl.searchParams.set("key", apiKey);
-
-  const videosRes = await fetch(videosUrl.toString());
-  if (!videosRes.ok) {
-    throw new Error(`YouTube videos fetch failed: ${videosRes.status}`);
-  }
-
-  const videosData = await videosRes.json();
-  const candidates: YouTubeVideoCandidate[] = [];
-
-  for (const video of videosData.items ?? []) {
-    const iso8601Duration = video.contentDetails?.duration ?? "";
-    const durationSeconds = parseISO8601Duration(iso8601Duration);
-    const viewCount = Number(video.statistics?.viewCount ?? 0);
-    const publishedAt = video.snippet?.publishedAt ?? null;
-
-    candidates.push({
-      video_id: video.id,
-      title: video.snippet?.title ?? "",
-      channel_name: video.snippet?.channelTitle ?? "",
-      view_count: viewCount,
-      duration_seconds: durationSeconds,
-      published_at: publishedAt,
-      description: video.snippet?.description ?? "",
-    });
-  }
-
-  return candidates;
-}
-
-function parseISO8601Duration(duration: string): number {
-  const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-  if (!match) return 0;
-
-  const hours = match[1] ? parseInt(match[1], 10) : 0;
-  const minutes = match[2] ? parseInt(match[2], 10) : 0;
-  const seconds = match[3] ? parseInt(match[3], 10) : 0;
-  return hours * 3600 + minutes * 60 + seconds;
-}
-
-function getPublishedAfter(): string {
-  const date = new Date();
-  date.setFullYear(date.getFullYear() - 2);
-  return date.toISOString();
-}
-
-// --- Embedding helpers ---
+// --- Per-skill indexing ---
 async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   const { createEmbeddingModel } = await import("@/lib/ai/provider");
@@ -347,7 +280,8 @@ async function indexSkill(
     throw new Error("Supabase client is null");
   }
   // 1. Search YouTube
-  const candidates = await searchYouTubeVideos(skill, youtubeApiKey);
+  const youtubeClient = createYouTubeClient();
+  const candidates = await youtubeClient.searchVideos(skill, 14);
   if (candidates.length === 0) {
     await supabase
       .from("skill_index_status")
@@ -405,6 +339,9 @@ async function indexSkill(
   let totalChunks = 0;
   let totalLessons = 0;
   let lessonGenerateMs = 0;
+  let videosWithData = 0;
+  let videosWithoutData = 0;
+  const failedVideoReasons: string[] = [];
 
   // 4. Process each new video: chapters + transcript + lesson notes (Feature 5)
   for (let vi = 0; vi < newVideos.length; vi++) {
@@ -439,7 +376,10 @@ async function indexSkill(
     // --- Transcript ---
     let transcriptChunks: TranscriptChunk[] = [];
     try {
-      const transcript = await fetchTranscript(video.video_id);
+      const transcript = await withRetry(() => fetchTranscript(video.video_id), {
+        attempts: 2,
+        delayMs: 4000,
+      });
       const rawChunks = chunkTranscript(
         transcript.map((t) => ({ offset: t.offset, text: t.text }))
       );
@@ -688,6 +628,18 @@ async function indexSkill(
         console.warn(`[tutorial-index] Chunk embedding best-effort failed for ${video.video_id}, chunks persisted without embeddings:`, (err as Error).message);
       }
     }
+
+    // Track whether this video produced any indexable data
+    const videoProducedData = chapters.length > 0 || transcriptChunks.length > 0;
+    if (videoProducedData) {
+      videosWithData++;
+    } else {
+      videosWithoutData++;
+      const reasons: string[] = [];
+      if (chapters.length === 0) reasons.push("no chapters parsed");
+      if (transcriptChunks.length === 0) reasons.push("transcript unavailable");
+      failedVideoReasons.push(`${video.video_id}: ${reasons.join(", ")}`);
+    }
   }
 
   // --- Backfill: regenerate stale lessons and fill missing (Fix 1 + Fix 2 backfill) ---
@@ -885,6 +837,34 @@ async function indexSkill(
     .select("id", { count: "exact", head: true })
     .eq("skill_tag", skill);
 
+  const hasExistingData = (chunkCount ?? 0) > 0 || (chapterVideos ?? 0) > 0;
+  const producedNewData = totalChunks > 0 || totalChapters > 0;
+
+  let runStatus: string;
+  let runError: string | null;
+
+  if (hasExistingData && producedNewData && videosWithoutData > 0) {
+    runStatus = "partial";
+    const sampleReasons = failedVideoReasons.slice(0, 3).join("; ");
+    runError = `${videosWithData} of ${newVideos.length} new videos produced data; ${videosWithoutData} failed (${sampleReasons})`;
+  } else if (hasExistingData && producedNewData) {
+    runStatus = "success";
+    runError = null;
+  } else if (hasExistingData && !producedNewData) {
+    // All selected videos were already indexed; no new data needed this run.
+    runStatus = "success";
+    runError = null;
+  } else if (!hasExistingData && producedNewData) {
+    runStatus = "success";
+    runError = null;
+  } else if (!hasExistingData && !producedNewData && selected.length > 0) {
+    runStatus = "success_empty";
+    runError = `${selected.length} videos found, transcripts unavailable for all`;
+  } else {
+    runStatus = "skipped_no_results";
+    runError = null;
+  }
+
   await supabase
     .from("skill_index_status")
     .upsert(
@@ -894,14 +874,14 @@ async function indexSkill(
         gap_mentions_30d: gapCounts.get(skill) ?? 0,
         total_chunks: chunkCount ?? 0,
         total_chapters: chapterVideos ?? 0,
-        last_run_status: "success",
-        last_error: null,
+        last_run_status: runStatus,
+        last_error: runError,
       },
       { onConflict: "skill" }
     );
 
   console.info(
-    `[tutorial-index] Skill "${skill}" lessons: ${totalLessons} generated in ${lessonGenerateMs}ms`
+    `[tutorial-index] Skill "${skill}" status=${runStatus} videos=${selected.length} new=${newVideos.length} withData=${videosWithData} withoutData=${videosWithoutData} lessons: ${totalLessons} generated in ${lessonGenerateMs}ms`
   );
 
   return {
@@ -910,7 +890,7 @@ async function indexSkill(
     chapters: totalChapters,
     lessons: totalLessons,
     lessonGenerateMs,
-    status: "success",
+    status: runStatus,
   };
 }
 

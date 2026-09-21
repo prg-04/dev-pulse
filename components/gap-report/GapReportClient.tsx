@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { YourSkillsPanel } from "./YourSkillsPanel";
 import { MarketAlignmentCard } from "./MarketAlignmentCard";
@@ -9,6 +9,7 @@ import { SkillsToConsiderCard } from "./SkillsToConsiderCard";
 import { RisingCard } from "./RisingCard";
 import { DecliningCard } from "./DecliningCard";
 import { RecommendationsCard } from "./RecommendationsCard";
+import { triggerOnDemandIndexing } from "@/app/actions";
 
 type GapSkill = { skill: string; count: number };
 type DeltaSkill = { skill: string; delta: number };
@@ -30,6 +31,7 @@ type Report = {
   yourSkills: string[];
   totalPostings: number;
   monthLabel: string;
+  skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }>;
 };
 
 export function GapReportClient({ initialReport }: { initialReport: Report }) {
@@ -38,6 +40,57 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
   const [skills, setSkills] = useState<string[]>(initialReport.yourSkills);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [indexingSkills, setIndexingSkills] = useState<Set<string>>(new Set());
+
+  // Automatically trigger on-demand indexing for gap skills that have no
+  // indexed data yet. This replaces the manual "Find a lesson" button with
+  // an automatic, server-side trigger (no user click needed).
+  useEffect(() => {
+    const skillsToIndex = report.gaps
+      .filter((g) => {
+        const status = report.skillIndexStatus[g.skill];
+        const hasData = (status?.total_chunks ?? 0) > 0 || (status?.total_chapters ?? 0) > 0;
+        const recentlyRequested = status?.on_demand_requested_at
+          ? Date.now() - new Date(status.on_demand_requested_at).getTime() < 30 * 60 * 1000
+          : false;
+        return !hasData && !recentlyRequested;
+      })
+      .map((g) => g.skill);
+
+    if (skillsToIndex.length === 0) return;
+
+    skillsToIndex.forEach((skill) => {
+      setIndexingSkills((prev) => new Set(prev).add(skill));
+      triggerOnDemandIndexing(skill)
+        .then((res) => {
+          if (res.result) {
+            setReport((prev) => ({
+              ...prev,
+              skillIndexStatus: {
+                ...prev.skillIndexStatus,
+                [skill]: {
+                  total_chunks: res.result.chunks,
+                  total_chapters: res.result.chapters,
+                  last_run_status: res.result.status === "indexed" ? "success" : res.result.status === "skipped_no_results" ? "skipped_no_results" : "failed",
+                  last_error: res.result.error ?? null,
+                  on_demand_requested_at: new Date().toISOString(),
+                },
+              },
+            }));
+          }
+        })
+        .catch((err) => {
+          console.error(`[GapReportClient] Auto-index failed for ${skill}:`, err);
+        })
+        .finally(() => {
+          setIndexingSkills((prev) => {
+            const next = new Set(prev);
+            next.delete(skill);
+            return next;
+          });
+        });
+    });
+  }, [report.gaps, report.skillIndexStatus]);
 
   const handleRemove = (skill: string) => {
     setSkills((prev) => prev.filter((s) => s !== skill));
@@ -66,6 +119,7 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
             rising: data.rising ?? prev.rising,
             declining: data.declining ?? prev.declining,
             recommendations: data.recommendations ?? prev.recommendations,
+            skillIndexStatus: data.skill_index_status ?? prev.skillIndexStatus,
           }));
           if (overrideSkills) setSkills(overrideSkills);
         }
@@ -135,7 +189,7 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
 
         <StrengthsCard strengths={report.strengths} summary={report.strengthsSummary} />
 
-        <SkillsToConsiderCard gaps={report.gaps} />
+        <SkillsToConsiderCard gaps={report.gaps} skillIndexStatus={report.skillIndexStatus} indexingSkills={indexingSkills} />
 
         <RisingCard items={report.rising} summary={report.risingSummary} />
 

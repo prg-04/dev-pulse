@@ -77,8 +77,10 @@ export async function POST(req: NextRequest) {
 
   const hasIndexedData = chunkRowsFull && chunkRowsFull.length > 0;
 
-  // If no indexed data, return mock tutorials for local development
-  if (!hasIndexedData) {
+  // If no indexed data, return mock tutorials ONLY in local development.
+  // Production must not serve synthetic data as if it were real search results.
+  const allowMockTutorials = process.env.NEXT_PUBLIC_ENV === "development";
+  if (!hasIndexedData && allowMockTutorials) {
     const mockTutorials = getMockTutorials(skill);
     if (mockTutorials.length > 0) {
       return NextResponse.json({
@@ -93,6 +95,10 @@ export async function POST(req: NextRequest) {
         })),
       }, { status: 200 });
     }
+    return NextResponse.json({ results: [] }, { status: 200 });
+  }
+
+  if (!hasIndexedData) {
     return NextResponse.json({ results: [] }, { status: 200 });
   }
 

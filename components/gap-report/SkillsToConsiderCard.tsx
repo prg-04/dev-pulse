@@ -15,14 +15,30 @@ type Tutorial = {
   starts_at?: string;
 };
 
-type Props = {
-  gaps: Gap[];
+type SkillIndexStatus = {
+  total_chunks: number;
+  total_chapters: number;
+  last_run_status: string | null;
+  last_error: string | null;
+  on_demand_requested_at: string | null;
 };
 
-export function SkillsToConsiderCard({ gaps }: Props) {
+type Props = {
+  gaps: Gap[];
+  skillIndexStatus?: Record<string, SkillIndexStatus>;
+  indexingSkills?: Set<string>;
+};
+
+type OnDemandResult = {
+  status: "indexed" | "skipped_no_results" | "skipped_recent" | "failed";
+  error?: string;
+};
+
+export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkills = new Set() }: Props) {
   const [selectedSkill, setSelectedSkill] = useState<string>(gaps[0]?.skill ?? "kubernetes");
   const [tutorials, setTutorials] = useState<Tutorial[]>([]);
   const [loading, setLoading] = useState(false);
+  const [onDemandResults, setOnDemandResults] = useState<Record<string, OnDemandResult>>({});
 
   // If the explicitly selected skill is no longer in the current gaps list,
   // fall back to the first available gap instead of showing a stale selection.
@@ -49,6 +65,30 @@ export function SkillsToConsiderCard({ gaps }: Props) {
     }
   }, []);
 
+  const triggerOnDemand = useCallback(async (skill: string) => {
+    setLoading(true);
+    setOnDemandResults((prev) => ({ ...prev, [skill]: { status: "indexed" } }));
+    try {
+      const res = await fetch("/api/cron/tutorial-index/ondemand", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skill }),
+      });
+      if (!res.ok) throw new Error("On-demand indexing failed");
+      const json = await res.json() as { result?: OnDemandResult };
+      const result = json.result ?? { status: "failed" as const };
+      setOnDemandResults((prev) => ({ ...prev, [skill]: result }));
+      await fetchTutorials(skill);
+    } catch (err) {
+      setOnDemandResults((prev) => ({
+        ...prev,
+        [skill]: { status: "failed", error: err instanceof Error ? err.message : "Unknown error" },
+      }));
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchTutorials]);
+
   const handleSkillSelect = useCallback((skill: string) => {
     setSelectedSkill(skill);
   }, []);
@@ -58,6 +98,12 @@ export function SkillsToConsiderCard({ gaps }: Props) {
   useEffect(() => {
     fetchTutorials(effectiveSkill);
   }, [effectiveSkill, fetchTutorials]);
+
+  const status = skillIndexStatus[effectiveSkill];
+  const hasIndexedData = (status?.total_chunks ?? 0) > 0 || (status?.total_chapters ?? 0) > 0;
+  const isIndexing = indexingSkills.has(effectiveSkill);
+  const onDemandResult = onDemandResults[effectiveSkill];
+  const showNoVideos = !isIndexing && !hasIndexedData && onDemandResult?.status === "skipped_no_results";
 
   return (
     <div className="rounded-xl border border-[#1E293B] bg-[#0F172A] p-5 border-l-2 border-l-[#EF4444] border-y-[#1E293B] border-r-[#1E293B]">
@@ -96,17 +142,56 @@ export function SkillsToConsiderCard({ gaps }: Props) {
           <span>
             {effectiveSkill} — tutorials
           </span>
-          <span>{loading ? "Searching…" : `${tutorials.length} targeted timestamps extracted`}</span>
+          <span>
+            {isIndexing
+              ? "Finding you a lesson…"
+              : loading
+                ? "Searching…"
+                : tutorials.length > 0
+                  ? `${tutorials.length} targeted timestamps extracted`
+                  : showNoVideos
+                    ? "No videos found"
+                    : hasIndexedData
+                      ? `${tutorials.length} targeted timestamps extracted`
+                      : "Not indexed yet"}
+          </span>
         </div>
 
         <div className="mt-3 space-y-3">
-          {loading ? (
+          {isIndexing ? (
+            <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
+              Finding you a lesson…
+            </p>
+          ) : showNoVideos ? (
+            <div className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#64748B]">
+              <p className="mb-2">No videos found for this skill</p>
+              <button
+                type="button"
+                onClick={() => triggerOnDemand(effectiveSkill)}
+                className="rounded border border-[#334155] bg-[#0F172A] px-3 py-1.5 text-[11px] font-medium text-[#94A3B8] hover:text-white hover:border-[#475569]"
+              >
+                Try again
+              </button>
+            </div>
+          ) : !hasIndexedData && !loading && tutorials.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#64748B]">
+              <p className="mb-2">No tutorials indexed yet for this skill</p>
+              <button
+                type="button"
+                onClick={() => triggerOnDemand(effectiveSkill)}
+                disabled={indexingSkills.has(effectiveSkill)}
+                className="rounded border border-[#334155] bg-[#0F172A] px-3 py-1.5 text-[11px] font-medium text-[#94A3B8] hover:text-white hover:border-[#475569] disabled:opacity-50"
+              >
+                Find a lesson
+              </button>
+            </div>
+          ) : loading ? (
             <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
               Searching tutorials…
             </p>
           ) : tutorials.length === 0 ? (
-            <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#64748B]">
-              no tutorials indexed yet for this skill
+            <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
+              Searching tutorials…
             </p>
           ) : (
             tutorials.map((t, idx) => (

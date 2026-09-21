@@ -55,6 +55,7 @@ export async function POST(req: NextRequest) {
   let declining = mockGapReport.declining;
   let totalPostings = mockGapReport.totalPostings;
   let monthLabel = mockGapReport.monthLabel;
+  const skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }> = {};
 
   let top50: { skill: string; mention_count: number }[] = [];
   try {
@@ -134,6 +135,22 @@ export async function POST(req: NextRequest) {
           .select("id", { count: "exact", head: true });
         if (typeof count === "number" && count > 0) totalPostings = count;
         monthLabel = now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+        // Fetch indexing status for gap skills (Option B: on-demand trigger support)
+        const gapSkills = gaps.map((g) => g.skill);
+        const { data: indexStatusRows } = await supabase
+          .from("skill_index_status")
+          .select("skill, total_chunks, total_chapters, last_run_status, last_error, on_demand_requested_at")
+          .in("skill", gapSkills);
+        for (const row of indexStatusRows ?? []) {
+          skillIndexStatus[row.skill] = {
+            total_chunks: row.total_chunks ?? 0,
+            total_chapters: row.total_chapters ?? 0,
+            last_run_status: row.last_run_status ?? null,
+            last_error: row.last_error ?? null,
+            on_demand_requested_at: row.on_demand_requested_at ?? null,
+          };
+        }
       }
     }
   } catch {
@@ -215,5 +232,6 @@ Return exactly 3 numbered recommendations as JSON array of strings, each one sen
     month_label: monthLabel,
     total_postings: totalPostings,
     evaluated_skills: skills,
+    skill_index_status: skillIndexStatus,
   });
 }
