@@ -183,9 +183,8 @@ export function JobDetail({ job, onToggleSave }: { job: CardJob | null; onToggle
           ) : summary?.the_role ? (
             <p className="mt-2 whitespace-pre-wrap text-[12.5px] leading-6 text-[#94A3B8]">{summary.the_role}</p>
           ) : (
-            <p className="mt-2 whitespace-pre-wrap text-[12.5px] leading-6 text-[#94A3B8]">
-              {job.title ? `We are seeking a ${job.title} to own key architecture and delivery.` : "Not disclosed."}{" "}
-              {stripHtml(job.description).slice(0, 200)}
+            <p className="mt-2 whitespace-pre-wrap text-[12.5px] leading-6 text-[#475569]">
+              {stripHtml(job.description).slice(0, 200) || "No role summary available for this listing."}
             </p>
           )}
         </section>
@@ -206,11 +205,7 @@ export function JobDetail({ job, onToggleSave }: { job: CardJob | null; onToggle
               ))}
             </ul>
           ) : (
-            <ul className="mt-2 list-disc space-y-2 pl-5 text-[12.5px] leading-6 text-[#94A3B8]">
-              <li className="marker:text-[#14B8A6]">Lead architecture of core streaming and compute systems using the stack above.</li>
-              <li className="marker:text-[#14B8A6]">Partner with infra to ship resilient multi-region services.</li>
-              <li className="marker:text-[#14B8A6]">Own performance, correctness, and zero-downtime migrations.</li>
-            </ul>
+            <p className="mt-2 text-[12.5px] leading-6 text-[#475569]">Not disclosed by the employer in this listing.</p>
           )}
         </section>
 
@@ -228,12 +223,7 @@ export function JobDetail({ job, onToggleSave }: { job: CardJob | null; onToggle
               ))}
             </ul>
           ) : (
-            <div className="mt-2 rounded-lg bg-[#0F172A] border border-[#1E293B] px-3 py-2.5">
-              <p className="flex gap-2 text-[12.5px] leading-6 text-[#94A3B8]">
-                <Check className="mt-1 h-3.5 w-3.5 shrink-0 text-[#22C55E]" />
-                <span>6+ years of professional engineering experience delivering production-grade web systems in TypeScript and modern React.</span>
-              </p>
-            </div>
+            <p className="mt-2 text-[12.5px] leading-6 text-[#475569]">Not disclosed by the employer in this listing.</p>
           )}
         </section>
 

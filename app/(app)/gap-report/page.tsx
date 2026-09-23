@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { GapReportClient } from "@/components/gap-report/GapReportClient";
 import { marketAlignmentPct } from "@/lib/matching";
 import { normalizeSkill } from "@/lib/skills-dictionary";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Skill Gap Report" };
 
 export default async function GapReportPage() {
   let report: {

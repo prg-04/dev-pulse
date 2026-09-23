@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { ProfileClient } from "@/components/profile/ProfileClient";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Profile & Market Preferences" };
 
 export default async function ProfilePage() {
   let profile = null;

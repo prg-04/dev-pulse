@@ -69,23 +69,27 @@ async function getUserSkills(supabase: SupabaseClient, userId: string): Promise<
   return (data ?? []).map((row) => row.skill);
 }
 
-async function hasRecentDispatch(
+export async function hasRecentDispatch(
   supabase: SupabaseClient,
   userId: string,
   alertType: string,
-  withinHours: number
+  withinHours: number,
+  referenceId?: string | null
 ): Promise<boolean> {
   const since = new Date();
   since.setHours(since.getHours() - withinHours);
 
-  const { data, error } = await supabase
+  const base = supabase
     .from("alert_dispatch_log")
     .select("id")
     .eq("user_id", userId)
     .eq("alert_type", alertType)
-    .gte("sent_at", since.toISOString())
-    .limit(1)
-    .maybeSingle();
+    .gte("sent_at", since.toISOString());
+
+  const { data, error } = await (referenceId != null
+    ? base.eq("reference_id", referenceId)
+    : base
+  ).limit(1).maybeSingle();
 
   if (error) throw new Error(`Failed to check dispatch log: ${error.message}`);
   return !!data;
@@ -125,7 +129,7 @@ async function processInstantMatchAlerts(
   supabase: SupabaseClient,
   jobs: JobPosting[],
   prefs: AlertPreference[],
-  profiles: Map<string, { full_name: string }>
+  profiles: Map<string, { full_name: string; email: string | null }>
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0;
   let failed = 0;
@@ -135,9 +139,6 @@ async function processInstantMatchAlerts(
 
     const profile = profiles.get(pref.user_id);
     if (!profile?.full_name) continue;
-
-    const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "instant_match", 24);
-    if (alreadySent) continue;
 
     const userSkills = await getUserSkills(supabase, pref.user_id);
     if (userSkills.length === 0) continue;
@@ -154,8 +155,20 @@ async function processInstantMatchAlerts(
 
     if (matchingJobs.length === 0) continue;
 
+    // Per-job dedup: only include jobs not already notified about
+    const newMatches: Array<{ job: JobPosting; score: number }> = [];
+    for (const { job, score } of matchingJobs) {
+      const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "instant_match", 24, job.id);
+      if (!alreadySent) {
+        newMatches.push({ job, score });
+      }
+    }
+
+    if (newMatches.length === 0) continue;
+    if (!profile.email) continue;
+
     try {
-      const jobListHtml = matchingJobs
+      const jobListHtml = newMatches
         .map(
           (j) =>
             `<li><strong>${j.job.title}</strong> at ${j.job.company} — ${j.score}% match<br/><a href="${j.job.external_url}">View posting</a></li>`
@@ -165,7 +178,7 @@ async function processInstantMatchAlerts(
       const html = `
         <h2>New jobs matching your skills</h2>
         <p>Hi ${profile.full_name},</p>
-        <p>${matchingJobs.length} new job posting${matchingJobs.length > 1 ? "s" : ""} scored ${pref.instant_match_threshold}%+ match with your skills:</p>
+        <p>${newMatches.length} new job posting${newMatches.length > 1 ? "s" : ""} scored ${pref.instant_match_threshold}%+ match with your skills:</p>
         <ul>${jobListHtml}</ul>
         <p>— DevPulse</p>
       `;
@@ -175,20 +188,24 @@ New jobs matching your skills
 
 Hi ${profile.full_name},
 
-${matchingJobs.length} new job posting${matchingJobs.length > 1 ? "s" : ""} scored ${pref.instant_match_threshold}%+ match with your skills:
+${newMatches.length} new job posting${newMatches.length > 1 ? "s" : ""} scored ${pref.instant_match_threshold}%+ match with your skills:
 
-${matchingJobs.map((j) => `- ${j.job.title} at ${j.job.company} — ${j.score}% match\n  ${j.job.external_url}`).join("\n\n")}
+${newMatches.map((j) => `- ${j.job.title} at ${j.job.company} — ${j.score}% match\n  ${j.job.external_url}`).join("\n\n")}
 
 — DevPulse
       `.trim();
 
-      await sendEmail(profile.full_name, `🔥 ${matchingJobs.length} new job${matchingJobs.length > 1 ? "s" : ""} matching your skills`, html, text);
-      await logDispatch(supabase, pref.user_id, "instant_match", null, "sent");
+      await sendEmail(profile.email, `🔥 ${newMatches.length} new job${newMatches.length > 1 ? "s" : ""} matching your skills`, html, text);
+      for (const { job } of newMatches) {
+        await logDispatch(supabase, pref.user_id, "instant_match", job.id, "sent");
+      }
       sent++;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error(`[alert-dispatch] Instant match failed for ${pref.user_id}:`, errorMessage);
-      await logDispatch(supabase, pref.user_id, "instant_match", null, "failed", errorMessage);
+      for (const { job } of newMatches) {
+        await logDispatch(supabase, pref.user_id, "instant_match", job.id, "failed", errorMessage);
+      }
       failed++;
     }
   }
@@ -199,7 +216,7 @@ ${matchingJobs.map((j) => `- ${j.job.title} at ${j.job.company} — ${j.score}% 
 async function processWeeklyDigest(
   supabase: SupabaseClient,
   prefs: AlertPreference[],
-  profiles: Map<string, { full_name: string }>,
+  profiles: Map<string, { full_name: string; email: string | null }>,
   userSourcesMap: Map<string, string[]>
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0;
@@ -243,6 +260,7 @@ async function processWeeklyDigest(
 
     const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "weekly_digest", 7 * 24);
     if (alreadySent) continue;
+    if (!profile.email) continue;
 
     const userSources = userSourcesMap.get(pref.user_id) ?? ["hackernews", "himalayas", "remotejobs", "remotive", "arbeitnow", "remoteok", "jobicy", "adzuna", "jooble", "themuse"];
     const filteredRising = rising.filter((m) => userSources.includes(m.source));
@@ -279,7 +297,7 @@ ${filteredDeclining.map((m) => `- ${m.skill}: ${m.delta}%`).join("\n") || "No de
 — DevPulse
       `.trim();
 
-      await sendEmail(profile.full_name, "📊 Your weekly market digest", html, text);
+      await sendEmail(profile.email, "📊 Your weekly market digest", html, text);
       await logDispatch(supabase, pref.user_id, "weekly_digest", null, "sent");
       sent++;
     } catch (err) {
@@ -296,7 +314,7 @@ ${filteredDeclining.map((m) => `- ${m.skill}: ${m.delta}%`).join("\n") || "No de
 async function processLearningGapDispatch(
   supabase: SupabaseClient,
   prefs: AlertPreference[],
-  profiles: Map<string, { full_name: string }>,
+  profiles: Map<string, { full_name: string; email: string | null }>,
   latestTutorialRun: { started_at: string } | null
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0;
@@ -309,9 +327,6 @@ async function processLearningGapDispatch(
 
     const profile = profiles.get(pref.user_id);
     if (!profile?.full_name) continue;
-
-    const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "learning_gap", 24);
-    if (alreadySent) continue;
 
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -337,8 +352,20 @@ async function processLearningGapDispatch(
 
     if (indexedSkills.length === 0) continue;
 
+    // Per-skill dedup: only include skills not already notified about
+    const newSkills: Array<{ skill: string; total_chunks: number; total_chapters: number }> = [];
+    for (const s of indexedSkills) {
+      const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "learning_gap", 24, s.skill);
+      if (!alreadySent) {
+        newSkills.push(s);
+      }
+    }
+
+    if (newSkills.length === 0) continue;
+    if (!profile.email) continue;
+
     try {
-      const skillsHtml = indexedSkills
+      const skillsHtml = newSkills
         .map(
           (s) =>
             `<li><strong>${s.skill}</strong> — ${s.total_chunks} tutorial chunks, ${s.total_chapters} chaptered videos</li>`
@@ -348,7 +375,7 @@ async function processLearningGapDispatch(
       const html = `
         <h2>New tutorials for your learning gaps</h2>
         <p>Hi ${profile.full_name},</p>
-        <p>We've indexed new tutorials for ${indexedSkills.length} skill${indexedSkills.length > 1 ? "s" : ""} you flagged as gaps:</p>
+        <p>We've indexed new tutorials for ${newSkills.length} skill${newSkills.length > 1 ? "s" : ""} you flagged as gaps:</p>
         <ul>${skillsHtml}</ul>
         <p>Head to the Gap Report to explore them.</p>
         <p>— DevPulse</p>
@@ -359,22 +386,26 @@ New tutorials for your learning gaps
 
 Hi ${profile.full_name},
 
-We've indexed new tutorials for ${indexedSkills.length} skill${indexedSkills.length > 1 ? "s" : ""} you flagged as gaps:
+We've indexed new tutorials for ${newSkills.length} skill${newSkills.length > 1 ? "s" : ""} you flagged as gaps:
 
-${indexedSkills.map((s) => `- ${s.skill}: ${s.total_chunks} tutorial chunks, ${s.total_chapters} chaptered videos`).join("\n")}
+${newSkills.map((s) => `- ${s.skill}: ${s.total_chunks} tutorial chunks, ${s.total_chapters} chaptered videos`).join("\n")}
 
 Head to the Gap Report to explore them.
 
 — DevPulse
       `.trim();
 
-      await sendEmail(profile.full_name, `🎓 New tutorials for ${indexedSkills.length} learning gap${indexedSkills.length > 1 ? "s" : ""}`, html, text);
-      await logDispatch(supabase, pref.user_id, "learning_gap", null, "sent");
+      await sendEmail(profile.email, `🎓 New tutorials for ${newSkills.length} learning gap${newSkills.length > 1 ? "s" : ""}`, html, text);
+      for (const s of newSkills) {
+        await logDispatch(supabase, pref.user_id, "learning_gap", s.skill, "sent");
+      }
       sent++;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error(`[alert-dispatch] Learning gap failed for ${pref.user_id}:`, errorMessage);
-      await logDispatch(supabase, pref.user_id, "learning_gap", null, "failed", errorMessage);
+      for (const s of newSkills) {
+        await logDispatch(supabase, pref.user_id, "learning_gap", s.skill, "failed", errorMessage);
+      }
       failed++;
     }
   }
@@ -430,9 +461,21 @@ export async function GET(req: Request) {
     .select("id, full_name")
     .in("id", userIds);
 
-  const profiles = new Map<string, { full_name: string }>();
+  // Email lives only in auth.users — profiles has no email column. Resolve each
+  // recipient's verified address via the admin API (service-role client).
+  // A missing address skips sending for that user; it must never fall back to
+  // sending to a display name.
+  const profiles = new Map<string, { full_name: string; email: string | null }>();
   for (const p of profilesData ?? []) {
-    profiles.set(p.id, p as { full_name: string });
+    const row = p as { id: string; full_name: string };
+    let email: string | null = null;
+    try {
+      const { data } = await supabase.auth.admin.getUserById(row.id);
+      email = data?.user?.email ?? null;
+    } catch {
+      email = null;
+    }
+    profiles.set(row.id, { full_name: row.full_name, email });
   }
 
   // Build user ID -> monitored_sources map

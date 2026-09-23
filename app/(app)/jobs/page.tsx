@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { getJobsWithSkills, getJobsStats, getUserSkillsAndGaps } from "@/lib/queries/jobs";
@@ -5,6 +6,8 @@ import { stackMatchPct } from "@/lib/matching";
 import { JobsClient, type JobsInitialJob } from "@/components/jobs/JobsClient";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Live Job Postings" };
 
 export default async function JobsPage({ searchParams }: { searchParams?: Record<string, string | string[]> }) {
   let stats = { total: 0, bySource: { hackernews: 0, himalayas: 0, remotejobs: 0, remotive: 0, arbeitnow: 0, remoteok: 0, jobicy: 0, adzuna: 0, jooble: 0, themuse: 0 } as Record<string, number>, lastUpdate: null as string | null };

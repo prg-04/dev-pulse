@@ -3,7 +3,6 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { normalizeSkill, ALL_SKILLS } from "@/lib/skills-dictionary";
-import { indexSkillOnDemand } from "../ondemand";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,54 +52,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const youtubeApiKey = process.env.YOUTUBE_API_KEY;
-  if (!youtubeApiKey) {
-    return NextResponse.json({ error: "YOUTUBE_API_KEY is not configured" }, { status: 500 });
-  }
-
   const supabase = createServiceRoleClient();
   if (!supabase) {
     return NextResponse.json({ error: "Missing Supabase env" }, { status: 500 });
   }
 
-  // Enforce daily on-demand cap to protect the shared AI generation pool.
-  const onDemandLimit = Number(process.env.ON_DEMAND_INDEX_LIMIT ?? "10");
-  if (onDemandLimit > 0) {
-    const today = new Date().toISOString().slice(0, 10);
-    const { data: usageRow } = await supabase
-      .from("ai_daily_usage")
-      .select("on_demand_index_calls")
-      .eq("usage_date", today)
-      .maybeSingle();
-
-    const currentCalls = (usageRow as { on_demand_index_calls?: number } | null)?.on_demand_index_calls ?? 0;
-    if (currentCalls >= onDemandLimit) {
-      return NextResponse.json(
-        { error: `On-demand indexing limit reached today (${currentCalls}/${onDemandLimit})` },
-        { status: 429 }
-      );
-    }
-  }
-
   try {
-    const result = await indexSkillOnDemand(supabase, normalizedSkill, youtubeApiKey);
-
-    // Increment the daily on-demand counter if indexing actually ran.
-    if (result.status !== "skipped_recent" && result.status !== "failed") {
-      const today = new Date().toISOString().slice(0, 10);
-      await supabase.rpc("increment_on_demand_index_calls", {
-        p_usage_date: today,
-        p_delta: 1,
-      });
-    }
+    await supabase.rpc("enqueue_discovery_request", {
+      p_skill: normalizedSkill,
+    });
 
     return NextResponse.json({
       ok: true,
-      result,
+      enqueued: true,
+      skill: normalizedSkill,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[tutorial-index-ondemand] Skill "${skill}" failed:`, msg);
+    console.error(`[tutorial-index-ondemand] Enqueue failed for "${skill}":`, msg);
     return NextResponse.json(
       { error: msg, skill },
       { status: 500 }

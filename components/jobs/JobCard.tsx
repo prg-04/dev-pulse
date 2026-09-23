@@ -55,9 +55,10 @@ function sourceBadge(source: string) {
   }
 }
 
-function timeAgo(iso: string | null): string {
-  if (!iso) return "";
+function timeAgo(iso: string | number | null): string {
+  if (iso == null || iso === "") return "";
   const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
   const diff = Date.now() - d.getTime();
   const h = Math.floor(diff / 3600000);
   if (h < 1) return "just now";
@@ -98,7 +99,7 @@ export function JobCard({ job, selected, onSelect }: { job: CardJob; selected: b
             </a>
           )}
         </div>
-        <span className="shrink-0 text-[11px] text-[#475569]">{timeAgo(job.posted_at ?? job.ingested_at)}</span>
+        <span className="shrink-0 text-[11px] text-[#475569]">{timeAgo(job.posted_at) || timeAgo(job.ingested_at)}</span>
       </div>
 
       <h3 className="mt-1.5 text-[13px] font-semibold leading-snug text-white line-clamp-2">{job.title ?? "Untitled role"}</h3>

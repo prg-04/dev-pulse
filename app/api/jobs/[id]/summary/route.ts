@@ -122,15 +122,27 @@ Return JSON only with keys: about_company (string or null), the_role (string or 
 
   if (!summary) summary = fallbackSummary(description);
 
-  try {
-    await service.from("job_summaries").insert({
-      job_id: id,
-      about_company: summary.about_company,
-      the_role: summary.the_role,
-      what_you_will_do: summary.what_you_will_do,
-      requirements: summary.requirements,
-    });
-  } catch {}
+  // Never cache an empty result: a failed AI call or a description with nothing
+  // extractable must retry on the next view, not serve a permanent blank.
+  // (Deliberately no status column — that would need a migration for zero benefit:
+  // absence of a row already means "not yet extracted".)
+  const hasContent =
+    summary.about_company != null ||
+    summary.the_role != null ||
+    summary.what_you_will_do.length > 0 ||
+    summary.requirements.length > 0;
+
+  if (hasContent) {
+    try {
+      await service.from("job_summaries").insert({
+        job_id: id,
+        about_company: summary.about_company,
+        the_role: summary.the_role,
+        what_you_will_do: summary.what_you_will_do,
+        requirements: summary.requirements,
+      });
+    } catch {}
+  }
 
   return NextResponse.json({ ...summary, cached: false });
 }

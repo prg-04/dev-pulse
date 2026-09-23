@@ -304,10 +304,14 @@ async function fetchArbeitnow(): Promise<RawJob[]> {
       description?: string;
       location?: string;
       remote?: boolean;
-      created_at?: string;
+      // Arbeitnow returns created_at as a unix-seconds integer (e.g. 1790082027), not an ISO string
+      created_at?: number | string;
       url?: string;
     }[]) {
       if (!job.slug || !job.title) continue;
+      // Normalize unix-seconds to ISO like Himalayas does for numeric pubDate — otherwise
+      // posted_at stores a raw epoch value and deriveMonth() reads it as milliseconds ("1970-01")
+      const postedAt = typeof job.created_at === "number" ? new Date(job.created_at * 1000).toISOString() : job.created_at;
       results.push({
         external_id: `arbeitnow-${job.slug}`,
         source: "arbeitnow",
@@ -316,7 +320,7 @@ async function fetchArbeitnow(): Promise<RawJob[]> {
         description: job.description ?? "",
         location_text: job.location,
         external_url: job.url ?? `https://www.arbeitnow.com/jobs/${job.slug}`,
-        posted_at: job.created_at,
+        posted_at: postedAt,
       });
     }
   } catch (err) {

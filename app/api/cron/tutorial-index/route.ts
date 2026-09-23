@@ -11,6 +11,12 @@ import {
   WINDOW_CHAR_BUDGET,
   type LessonSection,
 } from "@/lib/lesson-generation";
+import {
+  MIN_VIEW_COUNT,
+  MIN_DURATION_SECONDS,
+  TITLE_EXCLUDE_PATTERN,
+  filterCandidates,
+} from "@/lib/video-indexing";
 
 export const runtime = "nodejs";
 
@@ -38,11 +44,8 @@ interface TranscriptChunk {
 // --- Constants ---
 const WEEKLY_INDEX_BUDGET = Number(process.env.WEEKLY_INDEX_BUDGET ?? "10");
 const MAX_VIDEOS_PER_SKILL = 3;
-const MIN_VIEW_COUNT = 10000;
-const MIN_DURATION_SECONDS = 600;
 const CHAPTER_MIN_LINES = 3;
 const CHUNK_DURATION_SECONDS = 60;
-const TITLE_EXCLUDE_PATTERN = /\bin\s+\d+\s*(seconds?|minutes?|mins?)\b/i;
 
 // --- Helpers ---
 
@@ -297,13 +300,7 @@ async function indexSkill(
     return { videos: 0, chunks: 0, chapters: 0, lessons: 0, lessonGenerateMs: 0, status: "skipped_no_results" };
   }
 
-  const filtered = candidates.filter((c) => {
-    if (c.view_count <= MIN_VIEW_COUNT) return false;
-    if (c.duration_seconds <= MIN_DURATION_SECONDS) return false;
-    if (TITLE_EXCLUDE_PATTERN.test(c.title)) return false;
-    return true;
-  });
-
+  const filtered = filterCandidates(candidates);
   const selected = filtered.slice(0, MAX_VIDEOS_PER_SKILL);
   if (selected.length === 0) {
     const diag = `no_selected: candidates=${candidates.length} filtered=${filtered.length} (view>${MIN_VIEW_COUNT}, dur>${MIN_DURATION_SECONDS}s, titleExclude=${TITLE_EXCLUDE_PATTERN.source})`;
