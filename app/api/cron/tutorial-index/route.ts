@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { createYouTubeClient } from "@/lib/youtube/client";
-import { SKILLS_DICTIONARY } from "@/lib/skills-dictionary";
+import { SKILLS_DICTIONARY, normalizeSkill, ALL_SKILLS } from "@/lib/skills-dictionary";
 import { embed, embedMany } from "ai";
 import { fetchTranscript, YoutubeTranscriptError } from "youtube-transcript";
 import {
@@ -993,9 +993,18 @@ export async function GET(req: Request) {
   const prioritized = scored.filter((s) => !reserved.includes(s));
   let selected = [...reserved, ...prioritized].slice(0, WEEKLY_INDEX_BUDGET);
   if (canarySkill) {
-    const norm = canarySkill.toLowerCase().trim();
-    const found = scored.find((s) => s.skill.toLowerCase() === norm);
-    selected = found ? [found] : [{ skill: norm, gapMentions: 0, lastIndexedAt: null }];
+    // Validate against the skill dictionary (same pattern as the ondemand
+    // route): an unknown value must be rejected, never indexed verbatim —
+    // a pasted Gap object here once wrote JSON skill_tags for two videos.
+    const normalized = normalizeSkill(canarySkill);
+    if (!normalized || !ALL_SKILLS.includes(normalized)) {
+      return NextResponse.json(
+        { error: `Unknown skill: ${canarySkill}. Must be one of: ${ALL_SKILLS.join(", ")}` },
+        { status: 400 }
+      );
+    }
+    const found = scored.find((s) => s.skill.toLowerCase() === normalized);
+    selected = found ? [found] : [{ skill: normalized, gapMentions: 0, lastIndexedAt: null }];
   } else if (canaryLimit) {
     const n = Math.min(Math.max(parseInt(canaryLimit, 10) || WEEKLY_INDEX_BUDGET, 1), WEEKLY_INDEX_BUDGET);
     selected = selected.slice(0, n);
