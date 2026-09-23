@@ -117,25 +117,39 @@ export function normalizeTranscriptOffsets(
   transcript: { offset: number; text: string; duration?: number }[]
 ): { offset: number; text: string }[] {
   if (transcript.length === 0) return [];
-  const hasFractional = transcript.some(
-    (t) => t.offset % 1 !== 0 || ((t as { duration?: number }).duration ?? 0) % 1 !== 0
+  // Drop malformed captions BEFORE unit detection. A single non-finite or
+  // negative offset would otherwise flip hasFractional for the whole array
+  // (NaN % 1 !== 0 is true), disabling ms-detection and storing raw
+  // milliseconds as seconds for every valid caption. Dropped entries are
+  // excluded entirely, never repaired — inventing a timestamp for a malformed
+  // caption could place bogus text at the wrong point in a lesson.
+  const clean = transcript.filter(
+    (t) => typeof t.offset === "number" && Number.isFinite(t.offset) && t.offset >= 0
   );
-  const maxOffset = Math.max(...transcript.map((t) => t.offset));
+  if (clean.length === 0) return [];
+  const finiteDuration = (t: { duration?: number }): number => {
+    const d = (t as { duration?: number }).duration;
+    return typeof d === "number" && Number.isFinite(d) ? d : 0;
+  };
+  const hasFractional = clean.some(
+    (t) => t.offset % 1 !== 0 || finiteDuration(t) % 1 !== 0
+  );
+  const maxOffset = Math.max(...clean.map((t) => t.offset));
   const isMs = !hasFractional && maxOffset > 100000;
   if (!isMs) {
     const smallMs = !hasFractional && maxOffset > 5000 && maxOffset < 100000;
     if (smallMs) {
       const avgGap =
-        transcript.length > 1
-          ? (transcript[transcript.length - 1].offset - transcript[0].offset) / (transcript.length - 1)
+        clean.length > 1
+          ? (clean[clean.length - 1].offset - clean[0].offset) / (clean.length - 1)
           : 0;
       if (avgGap > 100) {
-        return transcript.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
+        return clean.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
       }
     }
-    return transcript.map((t) => ({ offset: t.offset, text: t.text }));
+    return clean.map((t) => ({ offset: t.offset, text: t.text }));
   }
-  return transcript.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
+  return clean.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
 }
 
 function chunkTranscript(

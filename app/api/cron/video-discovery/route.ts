@@ -243,10 +243,16 @@ export async function GET(req: Request) {
                 const windowsProcessed = Math.max(1, indexResult.chunks);
                 if (windowsProcessed > 0) {
                   const today = new Date().toISOString().slice(0, 10);
-                  await supabase.rpc("increment_generate_calls", {
+                  const { error: usageError } = await supabase.rpc("increment_generate_calls", {
                     p_usage_date: today,
                     p_delta: windowsProcessed,
                   });
+                  if (usageError) {
+                    console.error(
+                      `[video-discovery] increment_generate_calls failed for ${skill}:`,
+                      usageError.message
+                    );
+                  }
                 }
 
                 console.info(

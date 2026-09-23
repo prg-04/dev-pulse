@@ -64,7 +64,10 @@ export default async function ProfilePage() {
         }
 
         if (skillsRes.data) skills = skillsRes.data as typeof skills;
-        if (gapRes.data) gapExpansion = gapRes.data.map((r: { skill: string }) => r.skill);
+        if (gapRes.data) {
+          const seen = new Set<string>();
+          gapExpansion = gapRes.data.map((r: { skill: string }) => r.skill).filter((g) => !seen.has(g) && seen.add(g));
+        }
 
         const ap = alertRes.data as Record<string, unknown> | null;
         if (ap) {
