@@ -80,7 +80,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Failed to check indexed tutorials" }, { status: 500 });
   }
 
-  const hasIndexedData = chunkRowsFull && chunkRowsFull.length > 0;
+  const { data: chapterCheck } = await supabase
+    .from("tutorial_chapters")
+    .select("video_id")
+    .limit(1);
+  const hasIndexedData =
+    (chunkRowsFull && chunkRowsFull.length > 0) || (chapterCheck != null && chapterCheck.length > 0);
 
   // If no indexed data, return mock tutorials ONLY in local development.
   // Production must not serve synthetic data as if it were real search results.

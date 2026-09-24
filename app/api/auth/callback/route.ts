@@ -19,6 +19,11 @@ function githubHandleFromMetadata(metadata: unknown): string | null {
   return handle;
 }
 
+function safeNext(value: string | null): string {
+  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";
+  return value;
+}
+
 async function backfillGithubUsername(supabase: SupabaseClient): Promise<void> {
   const {
     data: { user },
@@ -45,7 +50,7 @@ async function backfillGithubUsername(supabase: SupabaseClient): Promise<void> {
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/";
+  const next = safeNext(searchParams.get("next"));
 
   if (code) {
     const url = getSupabaseUrl();

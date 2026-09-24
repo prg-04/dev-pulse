@@ -361,6 +361,8 @@ async function indexSkill(
     if (vi > 0) await new Promise((r) => setTimeout(r, 1800));
     // --- Chapters — decoupled persistence: chunks first, embeddings best-effort ---
     const chapters = parseChapters(video.description);
+    let chaptersPersisted = false;
+    let chapterPersistError: string | null = null;
     if (chapters.length > 0) {
       // 1. Persist chapters immediately without embeddings (embedding may be null if quota fails)
       try {
@@ -375,11 +377,15 @@ async function indexSkill(
           .upsert(chapterRowsWithoutEmbedding, { onConflict: "video_id,start_seconds" });
         if (chapterError) {
           console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, chapterError);
+          chapterPersistError = chapterError.message;
         } else {
           totalChapters += chapters.length;
+          chaptersPersisted = true;
         }
       } catch (err) {
-        console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, msg);
+        chapterPersistError = msg;
       }
       // Embedding is best-effort and runs AFTER lesson generation so a quota
       // exhaustion or timeout during embedding does not block lesson init.
@@ -404,6 +410,8 @@ async function indexSkill(
       }
     }
 
+    let chunksPersisted = false;
+    let chunkPersistError: string | null = null;
     if (transcriptChunks.length > 0) {
       // 1. Persist chunks immediately with null embedding — lesson generation uses chunk_text, not embeddings
       try {
@@ -423,11 +431,15 @@ async function indexSkill(
           .upsert(chunkRowsWithoutEmbedding, { onConflict: "video_id,start_seconds,skill_tag" });
         if (chunkError) {
           console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, chunkError);
+          chunkPersistError = chunkError.message;
         } else {
           totalChunks += transcriptChunks.length;
+          chunksPersisted = true;
         }
       } catch (err) {
-        console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, msg);
+        chunkPersistError = msg;
       }
       // Embedding is best-effort and runs AFTER lesson generation so a quota
       // exhaustion or timeout during embedding does not block lesson init.
@@ -641,15 +653,24 @@ async function indexSkill(
       }
     }
 
-    // Track whether this video produced any indexable data
-    const videoProducedData = chapters.length > 0 || transcriptChunks.length > 0;
+    const videoProducedData =
+      (chapters.length > 0 && chaptersPersisted) ||
+      (transcriptChunks.length > 0 && chunksPersisted);
     if (videoProducedData) {
       videosWithData++;
     } else {
       videosWithoutData++;
       const reasons: string[] = [];
-      if (chapters.length === 0) reasons.push("no chapters parsed");
-      if (transcriptChunks.length === 0) reasons.push("transcript unavailable");
+      if (chapters.length === 0) {
+        reasons.push("no chapters parsed");
+      } else if (!chaptersPersisted) {
+        reasons.push(`chapters persist failed${chapterPersistError ? `: ${chapterPersistError}` : ""}`);
+      }
+      if (transcriptChunks.length === 0) {
+        reasons.push("transcript unavailable");
+      } else if (!chunksPersisted) {
+        reasons.push(`chunks persist failed${chunkPersistError ? `: ${chunkPersistError}` : ""}`);
+      }
       failedVideoReasons.push(`${video.video_id}: ${reasons.join(", ")}`);
     }
   }

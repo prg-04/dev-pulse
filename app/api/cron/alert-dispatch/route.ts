@@ -143,13 +143,14 @@ async function logDispatch(
 
 async function sendEmail(to: string, subject: string, html: string, text: string) {
   const resend = getResendClient();
-  await resend.emails.send({
+  const { error } = await resend.emails.send({
     from: RESEND_FROM,
     to,
     subject,
     html,
     text,
   });
+  if (error) throw new Error(`Resend send failed: ${JSON.stringify(error)}`);
 }
 
 // --- Alert Types ---
@@ -499,21 +500,26 @@ export async function GET(req: Request) {
   // A missing address skips sending for that user; it must never fall back to
   // sending to a display name.
   const profiles = new Map<string, { full_name: string; email: string | null }>();
-  for (const p of profilesData ?? []) {
-    const row = p as { id: string; full_name: string };
-    let email: string | null = null;
-    try {
-      const { data, error: userError } = await supabase.auth.admin.getUserById(row.id);
-      if (userError) {
-        console.error(`[alert-dispatch] getUserById failed for ${row.id}:`, userError.message);
-        email = null;
-      } else {
-        email = data?.user?.email ?? null;
-      }
-    } catch {
-      email = null;
+  const profileRows = (profilesData ?? []) as Array<{ id: string; full_name: string }>;
+  const EMAIL_LOOKUP_CONCURRENCY = 5;
+  for (let i = 0; i < profileRows.length; i += EMAIL_LOOKUP_CONCURRENCY) {
+    const batch = await Promise.all(
+      profileRows.slice(i, i + EMAIL_LOOKUP_CONCURRENCY).map(async (row) => {
+        try {
+          const { data, error: userError } = await supabase.auth.admin.getUserById(row.id);
+          if (userError) {
+            console.error(`[alert-dispatch] getUserById failed for ${row.id}:`, userError.message);
+            return { row, email: null as string | null };
+          }
+          return { row, email: (data?.user?.email ?? null) as string | null };
+        } catch {
+          return { row, email: null as string | null };
+        }
+      })
+    );
+    for (const { row, email } of batch) {
+      profiles.set(row.id, { full_name: row.full_name, email });
     }
-    profiles.set(row.id, { full_name: row.full_name, email });
   }
 
   // Build user ID -> monitored_sources map

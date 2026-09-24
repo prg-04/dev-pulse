@@ -35,21 +35,24 @@ export function AppHeader() {
 
   useEffect(() => {
     let cancelled = false;
+    let latestRefresh = 0;
     const refresh = () => {
+      const seq = ++latestRefresh;
       fetch("/api/profile")
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          if (cancelled) return;
+          if (cancelled || seq !== latestRefresh) return;
           const typed = data as {
             profile?: { github_username?: string | null; full_name?: string | null } | null;
             email?: string | null;
           } | null;
           const handle = typed?.profile?.github_username ?? null;
           setGithubUsername(handle || null);
+          setImgFailed(false);
           setFallbackInitials(initialsFor(typed?.profile?.full_name, typed?.email));
         })
         .catch(() => {
-          if (!cancelled) setGithubUsername(null);
+          if (!cancelled && seq === latestRefresh) setGithubUsername(null);
         });
     };
     refresh();

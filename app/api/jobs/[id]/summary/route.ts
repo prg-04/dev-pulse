@@ -53,17 +53,28 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   if (postingErr) return NextResponse.json({ error: postingErr.message }, { status: 500 });
   if (!posting) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  const nonblank = (s: string | null | undefined): boolean =>
+    s != null && s.trim().length > 0;
+
   try {
     const { data: cached } = await service.from("job_summaries").select("*").eq("job_id", id).maybeSingle();
     if (cached) {
       const row = cached as { about_company: string | null; the_role: string | null; what_you_will_do: string[] | null; requirements: string[] | null };
-      return NextResponse.json({
-        about_company: row.about_company,
-        the_role: row.the_role,
-        what_you_will_do: row.what_you_will_do ?? [],
-        requirements: row.requirements ?? [],
-        cached: true,
-      });
+      const usable =
+        nonblank(row.about_company) ||
+        nonblank(row.the_role) ||
+        (row.what_you_will_do ?? []).some((b) => nonblank(b)) ||
+        (row.requirements ?? []).some((b) => nonblank(b));
+      if (usable) {
+        return NextResponse.json({
+          about_company: row.about_company,
+          the_role: row.the_role,
+          what_you_will_do: row.what_you_will_do ?? [],
+          requirements: row.requirements ?? [],
+          cached: true,
+        });
+      }
+      await service.from("job_summaries").delete().eq("job_id", id);
     }
   } catch {}
 
@@ -126,8 +137,6 @@ Return JSON only with keys: about_company (string or null), the_role (string or 
   // extractable must retry on the next view, not serve a permanent blank.
   // (Deliberately no status column — that would need a migration for zero benefit:
   // absence of a row already means "not yet extracted".)
-  const nonblank = (s: string | null | undefined): boolean =>
-    s != null && s.trim().length > 0;
   const hasContent =
     nonblank(summary.about_company) ||
     nonblank(summary.the_role) ||
