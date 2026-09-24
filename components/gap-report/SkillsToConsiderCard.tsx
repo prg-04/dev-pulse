@@ -273,7 +273,9 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
             </p>
           ) : mergedVideos.length === 0 && orphanTutorials.length === 0 ? (
             <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
-              Searching tutorials…
+              {onDemandResult?.status === "enqueued"
+                ? "Enqueued — cron will index soon"
+                : "No videos found for this skill"}
             </p>
           ) : (
             <>

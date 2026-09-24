@@ -159,6 +159,7 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
       }
 
       setSavedAt(new Date().toLocaleTimeString());
+      window.dispatchEvent(new CustomEvent("devpulse:profile-updated"));
       router.refresh();
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "Save failed");

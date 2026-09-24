@@ -84,6 +84,7 @@ export async function hasRecentDispatch(
     .select("id")
     .eq("user_id", userId)
     .eq("alert_type", alertType)
+    .eq("status", "sent")
     .gte("sent_at", since.toISOString());
 
   const { data, error } = await (referenceId != null
@@ -93,6 +94,34 @@ export async function hasRecentDispatch(
 
   if (error) throw new Error(`Failed to check dispatch log: ${error.message}`);
   return !!data;
+}
+
+/**
+ * Batched version of hasRecentDispatch: one query for many reference IDs.
+ * Returns the subset that already has a sent dispatch in the window.
+ */
+export async function getRecentlyDispatchedRefs(
+  supabase: SupabaseClient,
+  userId: string,
+  alertType: string,
+  withinHours: number,
+  referenceIds: string[]
+): Promise<Set<string>> {
+  if (referenceIds.length === 0) return new Set();
+  const since = new Date();
+  since.setHours(since.getHours() - withinHours);
+
+  const { data, error } = await supabase
+    .from("alert_dispatch_log")
+    .select("reference_id")
+    .eq("user_id", userId)
+    .eq("alert_type", alertType)
+    .eq("status", "sent")
+    .gte("sent_at", since.toISOString())
+    .in("reference_id", referenceIds);
+
+  if (error) throw new Error(`Failed to check dispatch log: ${error.message}`);
+  return new Set((data ?? []).map((row) => row.reference_id as string));
 }
 
 async function logDispatch(
@@ -155,14 +184,16 @@ async function processInstantMatchAlerts(
 
     if (matchingJobs.length === 0) continue;
 
-    // Per-job dedup: only include jobs not already notified about
-    const newMatches: Array<{ job: JobPosting; score: number }> = [];
-    for (const { job, score } of matchingJobs) {
-      const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "instant_match", 24, job.id);
-      if (!alreadySent) {
-        newMatches.push({ job, score });
-      }
-    }
+    // Per-job dedup: only include jobs not already notified about (one
+    // batched lookup instead of a query per job)
+    const dispatched = await getRecentlyDispatchedRefs(
+      supabase,
+      pref.user_id,
+      "instant_match",
+      24,
+      matchingJobs.map(({ job }) => job.id)
+    );
+    const newMatches = matchingJobs.filter(({ job }) => !dispatched.has(job.id));
 
     if (newMatches.length === 0) continue;
     if (!profile.email) continue;
@@ -352,14 +383,16 @@ async function processLearningGapDispatch(
 
     if (indexedSkills.length === 0) continue;
 
-    // Per-skill dedup: only include skills not already notified about
-    const newSkills: Array<{ skill: string; total_chunks: number; total_chapters: number }> = [];
-    for (const s of indexedSkills) {
-      const alreadySent = await hasRecentDispatch(supabase, pref.user_id, "learning_gap", 24, s.skill);
-      if (!alreadySent) {
-        newSkills.push(s);
-      }
-    }
+    // Per-skill dedup: only include skills not already notified about (one
+    // batched lookup instead of a query per skill)
+    const dispatchedSkills = await getRecentlyDispatchedRefs(
+      supabase,
+      pref.user_id,
+      "learning_gap",
+      24,
+      indexedSkills.map((s) => s.skill)
+    );
+    const newSkills = indexedSkills.filter((s) => !dispatchedSkills.has(s.skill));
 
     if (newSkills.length === 0) continue;
     if (!profile.email) continue;
@@ -470,8 +503,13 @@ export async function GET(req: Request) {
     const row = p as { id: string; full_name: string };
     let email: string | null = null;
     try {
-      const { data } = await supabase.auth.admin.getUserById(row.id);
-      email = data?.user?.email ?? null;
+      const { data, error: userError } = await supabase.auth.admin.getUserById(row.id);
+      if (userError) {
+        console.error(`[alert-dispatch] getUserById failed for ${row.id}:`, userError.message);
+        email = null;
+      } else {
+        email = data?.user?.email ?? null;
+      }
     } catch {
       email = null;
     }

@@ -16,7 +16,7 @@ export const maxDuration = 120;
 const CRON_SECRET = process.env.CRON_SECRET;
 const VIDEO_DISCOVERY_BATCH = Number(process.env.VIDEO_DISCOVERY_BATCH ?? "10");
 const VIDEO_DISCOVERY_MAX_RESULTS = Number(process.env.VIDEO_DISCOVERY_MAX_RESULTS ?? "10");
-const WALL_CLOCK_LIMIT_MS = Number(process.env.VIDEO_DISCOVERY_WALL_CLOCK_LIMIT_MS ?? "300000"); // 5 min
+const WALL_CLOCK_LIMIT_MS = Number(process.env.VIDEO_DISCOVERY_WALL_CLOCK_LIMIT_MS ?? "90000"); // 90s — must fit inside maxDuration (120s) with headroom for an in-flight index call
 const YOUTUBE_DAILY_UNIT_CEILING = Number(process.env.YOUTUBE_DAILY_UNIT_CEILING ?? "3000");
 const DAILY_GENERATE_LIMIT = Number(process.env.DAILY_GENERATE_LIMIT ?? "90");
 
@@ -185,13 +185,16 @@ export async function GET(req: Request) {
       }
 
       // --- Remove stale youtube_api rows only after successful upsert ---
+      // .not() takes raw PostgREST syntax (unlike .in(), it does not format
+      // arrays), so build the parenthesized, quoted list explicitly.
       const videoIds = candidates.map((c) => c.video_id);
+      const notInList = `(${videoIds.map((id) => `"${id}"`).join(",")})`;
       const { error: deleteError } = await supabase
         .from("skill_video_catalog")
         .delete()
         .eq("skill", skill)
         .eq("source", "youtube_api")
-        .not("video_id", "in", videoIds);
+        .not("video_id", "in", notInList);
 
       if (deleteError) {
         console.error(`[video-discovery] Failed to delete stale catalog rows for ${skill}:`, deleteError);
@@ -215,6 +218,7 @@ export async function GET(req: Request) {
               .select("video_id")
               .eq("video_id", topCandidate.video_id)
               .eq("skill_tag", skill)
+              .limit(1)
               .maybeSingle();
 
             if (!existingChunk) {

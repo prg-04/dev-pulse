@@ -93,7 +93,7 @@ function createMockSupabase(config: {
     deleteError = null,
   } = config;
 
-  const capturedDeleteCalls: Array<{ skill: string; source: string; notIn?: string[] }> = [];
+  const capturedDeleteCalls: Array<{ skill: string; source: string; notIn?: string }> = [];
   const capturedUpsertCalls: Array<{ skill: string; count: number }> = [];
 
   const from = vi.fn((table: string) => {
@@ -134,11 +134,11 @@ function createMockSupabase(config: {
           error: null,
         })),
         delete: vi.fn(() => {
-          let eqSkill = vi.fn(() => {
-            let eqSource = vi.fn(() => {
+          const eqSkill = vi.fn(() => {
+            const eqSource = vi.fn(() => {
               const notMock = vi.fn((_column: string, _op: string, value: unknown) => {
-                // Capture the not-in argument as an array when passed natively
-                if (Array.isArray(value)) {
+                // Capture the raw PostgREST list string, e.g. '("new-vid-1","new-vid-2")'
+                if (typeof value === "string") {
                   capturedDeleteCalls.push({ skill: "typescript", source: "youtube_api", notIn: value });
                 }
                 return { error: deleteError ?? null };
@@ -454,11 +454,11 @@ describe("GET /api/cron/video-discovery", () => {
     const body = await res.json();
     expect(body.skills_processed).toEqual(["typescript"]);
 
-    // Verify stale youtube_api rows were deleted with correct not-in clause (array form)
+    // Verify stale youtube_api rows were deleted with a parenthesized PostgREST not-in list
     const deleteCall = mockSupabase.capturedDeleteCalls.find((c) => c.skill === "typescript");
     expect(deleteCall).toBeDefined();
     expect(deleteCall!.source).toBe("youtube_api");
-    expect(deleteCall!.notIn).toEqual(["new-vid-1", "new-vid-2"]);
+    expect(deleteCall!.notIn).toBe('("new-vid-1","new-vid-2")');
   });
 
   it("zero candidates leaves existing catalog rows untouched and does not call delete", async () => {
@@ -560,7 +560,7 @@ describe("GET /api/cron/video-discovery", () => {
     usageConsumer = mockSupabase.from;
 
     // Override the from function to inject dynamic maybeSingle for usage reads
-    // @ts-ignore - override for dynamic usage simulation
+    // @ts-expect-error - override for dynamic usage simulation
     mockSupabase.from = vi.fn((table: string) => {
       if (table === "youtube_daily_usage") {
         return {

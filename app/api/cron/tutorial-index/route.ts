@@ -157,6 +157,7 @@ function chunkTranscript(
 ): TranscriptChunk[] {
   if (transcript.length === 0) return [];
   const normalized = normalizeTranscriptOffsets(transcript as { offset: number; text: string; duration?: number }[]);
+  if (normalized.length === 0) return [];
 
   const chunks: TranscriptChunk[] = [];
   let currentChunk: TranscriptChunk = { start_seconds: normalized[0].offset, text: "" };
@@ -862,15 +863,26 @@ async function indexSkill(
     runStatus = "success";
     runError = null;
   } else if (hasExistingData && !producedNewData) {
-    // All selected videos were already indexed; no new data needed this run.
-    runStatus = "success";
-    runError = null;
+    if (newVideos.length > 0) {
+      // New videos were attempted but every one failed — not a success.
+      runStatus = "failed";
+      runError = `${videosWithoutData} new videos all failed (${failedVideoReasons.slice(0, 3).join("; ")})`;
+    } else {
+      // All selected videos were already indexed; no new data needed this run.
+      runStatus = "success";
+      runError = null;
+    }
   } else if (!hasExistingData && producedNewData) {
     runStatus = "success";
     runError = null;
   } else if (!hasExistingData && !producedNewData && selected.length > 0) {
-    runStatus = "success_empty";
-    runError = `${selected.length} videos found, transcripts unavailable for all`;
+    if (videosWithoutData > 0) {
+      runStatus = "failed";
+      runError = `${videosWithoutData} new videos all failed (${failedVideoReasons.slice(0, 3).join("; ")})`;
+    } else {
+      runStatus = "success_empty";
+      runError = `${selected.length} videos found, transcripts unavailable for all`;
+    }
   } else {
     runStatus = "skipped_no_results";
     runError = null;

@@ -58,9 +58,17 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await supabase.rpc("enqueue_discovery_request", {
+    const { error: enqueueError } = await supabase.rpc("enqueue_discovery_request", {
       p_skill: normalizedSkill,
     });
+
+    if (enqueueError) {
+      console.error(`[tutorial-index-ondemand] Enqueue failed for "${skill}":`, enqueueError.message);
+      return NextResponse.json(
+        { error: enqueueError.message, skill },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       ok: true,

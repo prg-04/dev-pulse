@@ -126,11 +126,13 @@ Return JSON only with keys: about_company (string or null), the_role (string or 
   // extractable must retry on the next view, not serve a permanent blank.
   // (Deliberately no status column — that would need a migration for zero benefit:
   // absence of a row already means "not yet extracted".)
+  const nonblank = (s: string | null | undefined): boolean =>
+    s != null && s.trim().length > 0;
   const hasContent =
-    summary.about_company != null ||
-    summary.the_role != null ||
-    summary.what_you_will_do.length > 0 ||
-    summary.requirements.length > 0;
+    nonblank(summary.about_company) ||
+    nonblank(summary.the_role) ||
+    summary.what_you_will_do.some((b) => nonblank(b)) ||
+    summary.requirements.some((b) => nonblank(b));
 
   if (hasContent) {
     try {

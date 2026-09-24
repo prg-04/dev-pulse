@@ -35,23 +35,30 @@ export function AppHeader() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/profile")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled) return;
-        const typed = data as {
-          profile?: { github_username?: string | null; full_name?: string | null } | null;
-          email?: string | null;
-        } | null;
-        const handle = typed?.profile?.github_username ?? null;
-        setGithubUsername(handle || null);
-        setFallbackInitials(initialsFor(typed?.profile?.full_name, typed?.email));
-      })
-      .catch(() => {
-        if (!cancelled) setGithubUsername(null);
-      });
+    const refresh = () => {
+      fetch("/api/profile")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (cancelled) return;
+          const typed = data as {
+            profile?: { github_username?: string | null; full_name?: string | null } | null;
+            email?: string | null;
+          } | null;
+          const handle = typed?.profile?.github_username ?? null;
+          setGithubUsername(handle || null);
+          setFallbackInitials(initialsFor(typed?.profile?.full_name, typed?.email));
+        })
+        .catch(() => {
+          if (!cancelled) setGithubUsername(null);
+        });
+    };
+    refresh();
+    // Re-fetch after ProfileClient saves (header otherwise shows stale
+    // handle/initials until a full reload).
+    window.addEventListener("devpulse:profile-updated", refresh);
     return () => {
       cancelled = true;
+      window.removeEventListener("devpulse:profile-updated", refresh);
     };
   }, []);
 

@@ -32,6 +32,7 @@ function createMockSupabaseClient(overrides: {
 
   let referenceIdMethod: string | null = null;
   let referenceIdValue: unknown = null;
+  let inValues: unknown[] = [];
 
   // Every filter method returns a chainable query builder
   const queryBuilder = () => {
@@ -59,6 +60,10 @@ function createMockSupabaseClient(overrides: {
     builder.gte = vi.fn(() => builder);
     builder.select = vi.fn(() => builder);
     builder.from = vi.fn(() => builder);
+    builder.in = vi.fn((_col: string, val: unknown) => {
+      inValues = Array.isArray(val) ? val : [];
+      return Promise.resolve({ data, error });
+    });
 
     return builder;
   };
@@ -67,6 +72,7 @@ function createMockSupabaseClient(overrides: {
     client: { from: vi.fn(() => queryBuilder()) },
     referenceIdMethod: () => referenceIdMethod,
     referenceIdValue: () => referenceIdValue,
+    inValues: () => inValues,
   };
 }
 
@@ -91,7 +97,7 @@ describe("hasRecentDispatch", () => {
     });
 
     const result = await hasRecentDispatch(
-      // @ts-ignore test mock
+      // @ts-expect-error test mock
       mockSupabase.client,
       "user-123",
       "instant_match",
@@ -112,7 +118,7 @@ describe("hasRecentDispatch", () => {
     });
 
     const result = await hasRecentDispatch(
-      // @ts-ignore test mock
+      // @ts-expect-error test mock
       mockSupabase.client,
       "user-123",
       "instant_match",
@@ -132,7 +138,7 @@ describe("hasRecentDispatch", () => {
     });
 
     const result = await hasRecentDispatch(
-      // @ts-ignore test mock
+      // @ts-expect-error test mock
       mockSupabase.client,
       "user-123",
       "weekly_digest",
@@ -152,7 +158,7 @@ describe("hasRecentDispatch", () => {
     });
 
     const result = await hasRecentDispatch(
-      // @ts-ignore test mock
+      // @ts-expect-error test mock
       mockSupabase.client,
       "user-123",
       "weekly_digest",
@@ -170,8 +176,47 @@ describe("hasRecentDispatch", () => {
     });
 
     await expect(
-      // @ts-ignore test mock
+      // @ts-expect-error test mock
       hasRecentDispatch(mockSupabase.client, "user-123", "instant_match", 24, "job-1")
     ).rejects.toThrow("Failed to check dispatch log: relation alert_dispatch_log does not exist");
+  });
+});
+
+describe("getRecentlyDispatchedRefs (batched dedup)", () => {
+  it("returns the dispatched subset with a single .in() query", async () => {
+    const mockSupabase = createMockSupabaseClient({
+      data: [{ reference_id: "job-1" }, { reference_id: "job-3" }],
+      error: null,
+    });
+
+    const { getRecentlyDispatchedRefs } = await import("@/app/api/cron/alert-dispatch/route");
+    const result = await getRecentlyDispatchedRefs(
+      // @ts-expect-error test mock
+      mockSupabase.client,
+      "user-123",
+      "instant_match",
+      24,
+      ["job-1", "job-2", "job-3"]
+    );
+
+    expect(result).toEqual(new Set(["job-1", "job-3"]));
+    expect(mockSupabase.inValues()).toEqual(["job-1", "job-2", "job-3"]);
+  });
+
+  it("skips the query entirely for an empty reference list", async () => {
+    const mockSupabase = createMockSupabaseClient({ data: [], error: null });
+
+    const { getRecentlyDispatchedRefs } = await import("@/app/api/cron/alert-dispatch/route");
+    const result = await getRecentlyDispatchedRefs(
+      // @ts-expect-error test mock
+      mockSupabase.client,
+      "user-123",
+      "instant_match",
+      24,
+      []
+    );
+
+    expect(result).toEqual(new Set());
+    expect(mockSupabase.client.from).not.toHaveBeenCalled();
   });
 });

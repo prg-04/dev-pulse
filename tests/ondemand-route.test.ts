@@ -113,6 +113,34 @@ describe("POST /api/cron/tutorial-index/ondemand (thin enqueue)", () => {
     });
   });
 
+  it("returns 500 when the enqueue RPC fails instead of reporting success", async () => {
+    const mockSupabase = createMockSupabase({ rpcError: { message: "function does not exist" } });
+
+    const { createClient } = await import("@/lib/supabase/server");
+    (createClient as ReturnType<typeof vi.fn>).mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1", email: "test@example.com" } } }),
+      },
+    });
+
+    const { createServiceRoleClient } = await import("@/lib/supabase/service-role");
+    (createServiceRoleClient as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
+
+    const { POST } = await import("@/app/api/cron/tutorial-index/ondemand/route");
+
+    const req = new Request("http://localhost/api/cron/tutorial-index/ondemand", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skill: "typescript" }),
+    }) as unknown as NextRequest;
+
+    const res = await POST(req);
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("function does not exist");
+    expect(body.enqueued).toBeUndefined();
+  });
+
   it("rejects unknown skills with 400", async () => {
     const { createClient } = await import("@/lib/supabase/server");
     (createClient as ReturnType<typeof vi.fn>).mockResolvedValue({

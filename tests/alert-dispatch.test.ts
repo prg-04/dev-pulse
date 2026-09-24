@@ -146,7 +146,7 @@ describe("GET /api/cron/alert-dispatch (recipient honesty)", () => {
 
   it("suppresses resend when the dispatch log already has this job (dedup=true path)", async () => {
     const mockSupabase = createMockSupabase({
-      dispatchLogRows: [{ id: "logged" }],
+      dispatchLogRows: [{ id: "logged", reference_id: "job-1", status: "sent" }],
     });
 
     const { createServiceRoleClient } = await import("@/lib/supabase/service-role");

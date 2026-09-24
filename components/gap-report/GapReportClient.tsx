@@ -66,6 +66,10 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skill }),
+      }).then((res) => {
+        if (!res.ok) {
+          throw new Error(`Enqueue failed: ${res.status}`);
+        }
       }).catch((err) => {
         console.error(`[GapReportClient] Enqueue failed for ${skill}:`, err);
         enqueuedRef.current.delete(skill);

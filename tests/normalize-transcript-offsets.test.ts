@@ -90,4 +90,10 @@ describe("normalizeTranscriptOffsets poison resistance (Step 2)", () => {
     expect(chunks.length).toBe(1);
     expect(chunks[0].start_seconds).toBe(0);
   });
+
+  it("chunkTranscript returns empty for all-poisoned input instead of crashing", async () => {
+    const { chunkTranscript } = await import("@/lib/video-indexing");
+    expect(chunkTranscript(caps([NaN, undefined, -1]))).toEqual([]);
+    expect(chunkTranscript([])).toEqual([]);
+  });
 });

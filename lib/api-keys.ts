@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createHash, randomBytes } from "crypto";
 import type { NextRequest } from "next/server";
+import { getSupabaseUrl, getSupabaseServiceRoleKey } from "@/lib/supabase/env";
 
 // Server-only helpers per §12e — never import in client components.
 // Hash = sha256(raw + API_KEY_PEPPER) hex.
@@ -53,14 +54,6 @@ export async function resolveUserFromBearer(req: NextRequest): Promise<string | 
   // update last_used_at best-effort (not blocking)
   await admin.from("api_keys").update({ last_used_at: new Date().toISOString() }).eq("key_hash", hash);
   return row.user_id ?? null;
-}
-
-function getSupabaseUrl(): string | null {
-  return process.env.NEXT_PUBLIC_SUPABASE_URL ?? null;
-}
-
-function getSupabaseServiceRoleKey(): string | null {
-  return process.env.SUPABASE_SERVICE_ROLE_KEY ?? null;
 }
 
 function createAnonClient(url: string, key: string): SupabaseClient {

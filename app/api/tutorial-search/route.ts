@@ -69,11 +69,16 @@ export async function POST(req: NextRequest) {
 
   // Check if we have any indexed data for this skill — fetch up to 50 video_ids
   // to use as filter for chapter search (fixes prior limit(1) bug that capped results to 1 video)
-  const { data: chunkRowsFull } = await supabase
+  const { data: chunkRowsFull, error: chunkRowsError } = await supabase
     .from("tutorial_chunks")
     .select("video_id")
     .eq("skill_tag", skill)
     .limit(50);
+
+  if (chunkRowsError) {
+    console.error("tutorial-search indexed-data lookup failed", chunkRowsError);
+    return NextResponse.json({ error: "Failed to check indexed tutorials" }, { status: 500 });
+  }
 
   const hasIndexedData = chunkRowsFull && chunkRowsFull.length > 0;
 

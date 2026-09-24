@@ -107,6 +107,7 @@ export function chunkTranscript(
   const normalized = normalizeTranscriptOffsets(
     transcript as { offset: number; text: string; duration?: number }[]
   );
+  if (normalized.length === 0) return [];
 
   const chunks: { start_seconds: number; text: string }[] = [];
   let currentChunk: { start_seconds: number; text: string } = { start_seconds: normalized[0].offset, text: "" };
