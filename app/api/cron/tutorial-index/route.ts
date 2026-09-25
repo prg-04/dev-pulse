@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
-import { SKILLS_DICTIONARY } from "@/lib/skills-dictionary";
+import { createYouTubeClient } from "@/lib/youtube/client";
+import { SKILLS_DICTIONARY, normalizeSkill, ALL_SKILLS } from "@/lib/skills-dictionary";
 import { embed, embedMany } from "ai";
 import { fetchTranscript, YoutubeTranscriptError } from "youtube-transcript";
 import {
@@ -10,6 +11,12 @@ import {
   WINDOW_CHAR_BUDGET,
   type LessonSection,
 } from "@/lib/lesson-generation";
+import {
+  MIN_VIEW_COUNT,
+  MIN_DURATION_SECONDS,
+  TITLE_EXCLUDE_PATTERN,
+  filterCandidates,
+} from "@/lib/video-indexing";
 
 export const runtime = "nodejs";
 
@@ -22,16 +29,6 @@ interface SkillIndexStatus {
   total_chapters: number;
   last_run_status: string | null;
   last_error: string | null;
-}
-
-interface YouTubeVideoCandidate {
-  video_id: string;
-  title: string;
-  channel_name: string;
-  view_count: number;
-  duration_seconds: number;
-  published_at: string | null;
-  description: string;
 }
 
 interface ParsedChapter {
@@ -47,13 +44,34 @@ interface TranscriptChunk {
 // --- Constants ---
 const WEEKLY_INDEX_BUDGET = Number(process.env.WEEKLY_INDEX_BUDGET ?? "10");
 const MAX_VIDEOS_PER_SKILL = 3;
-const MIN_VIEW_COUNT = 10000;
-const MIN_DURATION_SECONDS = 600;
 const CHAPTER_MIN_LINES = 3;
 const CHUNK_DURATION_SECONDS = 60;
-const TITLE_EXCLUDE_PATTERN = /\bin\s+\d+\s*(seconds?|minutes?|mins?)\b/i;
 
 // --- Helpers ---
+
+/** Retry an async function up to `attempts` times with a fixed delay between tries. */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  { attempts = 2, delayMs = 4000 } = {}
+): Promise<T> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (i < attempts - 1) {
+        console.warn(
+          `[tutorial-index] Retry ${i + 1}/${attempts - 1} after error: ${
+            err instanceof Error ? err.message : err
+          }`
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
 function parseISOString(value: string | null): Date {
   if (!value) return new Date(0);
   return new Date(value);
@@ -99,25 +117,39 @@ export function normalizeTranscriptOffsets(
   transcript: { offset: number; text: string; duration?: number }[]
 ): { offset: number; text: string }[] {
   if (transcript.length === 0) return [];
-  const hasFractional = transcript.some(
-    (t) => t.offset % 1 !== 0 || ((t as { duration?: number }).duration ?? 0) % 1 !== 0
+  // Drop malformed captions BEFORE unit detection. A single non-finite or
+  // negative offset would otherwise flip hasFractional for the whole array
+  // (NaN % 1 !== 0 is true), disabling ms-detection and storing raw
+  // milliseconds as seconds for every valid caption. Dropped entries are
+  // excluded entirely, never repaired — inventing a timestamp for a malformed
+  // caption could place bogus text at the wrong point in a lesson.
+  const clean = transcript.filter(
+    (t) => typeof t.offset === "number" && Number.isFinite(t.offset) && t.offset >= 0
   );
-  const maxOffset = Math.max(...transcript.map((t) => t.offset));
+  if (clean.length === 0) return [];
+  const finiteDuration = (t: { duration?: number }): number => {
+    const d = (t as { duration?: number }).duration;
+    return typeof d === "number" && Number.isFinite(d) ? d : 0;
+  };
+  const hasFractional = clean.some(
+    (t) => t.offset % 1 !== 0 || finiteDuration(t) % 1 !== 0
+  );
+  const maxOffset = Math.max(...clean.map((t) => t.offset));
   const isMs = !hasFractional && maxOffset > 100000;
   if (!isMs) {
     const smallMs = !hasFractional && maxOffset > 5000 && maxOffset < 100000;
     if (smallMs) {
       const avgGap =
-        transcript.length > 1
-          ? (transcript[transcript.length - 1].offset - transcript[0].offset) / (transcript.length - 1)
+        clean.length > 1
+          ? (clean[clean.length - 1].offset - clean[0].offset) / (clean.length - 1)
           : 0;
       if (avgGap > 100) {
-        return transcript.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
+        return clean.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
       }
     }
-    return transcript.map((t) => ({ offset: t.offset, text: t.text }));
+    return clean.map((t) => ({ offset: t.offset, text: t.text }));
   }
-  return transcript.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
+  return clean.map((t) => ({ offset: Math.floor(t.offset / 1000), text: t.text }));
 }
 
 function chunkTranscript(
@@ -125,6 +157,7 @@ function chunkTranscript(
 ): TranscriptChunk[] {
   if (transcript.length === 0) return [];
   const normalized = normalizeTranscriptOffsets(transcript as { offset: number; text: string; duration?: number }[]);
+  if (normalized.length === 0) return [];
 
   const chunks: TranscriptChunk[] = [];
   let currentChunk: TranscriptChunk = { start_seconds: normalized[0].offset, text: "" };
@@ -145,89 +178,7 @@ function chunkTranscript(
   return chunks;
 }
 
-// --- YouTube API ---
-async function searchYouTubeVideos(
-  skill: string,
-  apiKey: string
-): Promise<YouTubeVideoCandidate[]> {
-  const searchUrl = new URL("https://www.googleapis.com/youtube/v3/search");
-  searchUrl.searchParams.set("q", `${skill} complete tutorial course`);
-  searchUrl.searchParams.set("type", "video");
-  searchUrl.searchParams.set("order", "relevance");
-  searchUrl.searchParams.set("publishedAfter", getPublishedAfter());
-  searchUrl.searchParams.set("maxResults", "14");
-  searchUrl.searchParams.set("key", apiKey);
-
-  const searchRes = await fetch(searchUrl.toString());
-  if (!searchRes.ok) {
-    throw new Error(`YouTube search failed: ${searchRes.status}`);
-  }
-
-  const searchData = await searchRes.json();
-  const items = searchData.items ?? [];
-  if (items.length === 0) return [];
-
-  const videoIds = items
-    .map((item: Record<string, unknown>) => {
-      const idObj = item.id as { videoId?: string } | string | undefined;
-      const vid = typeof idObj === "string" ? idObj : idObj?.videoId;
-      return typeof vid === "string" ? vid : null;
-    })
-    .filter((id: string | null): id is string => id !== null);
-
-  if (videoIds.length === 0) return [];
-
-  // Fetch detailed metadata
-  const videosUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
-  videosUrl.searchParams.set("id", videoIds.join(","));
-  videosUrl.searchParams.set("part", "contentDetails,snippet,statistics");
-  videosUrl.searchParams.set("key", apiKey);
-
-  const videosRes = await fetch(videosUrl.toString());
-  if (!videosRes.ok) {
-    throw new Error(`YouTube videos fetch failed: ${videosRes.status}`);
-  }
-
-  const videosData = await videosRes.json();
-  const candidates: YouTubeVideoCandidate[] = [];
-
-  for (const video of videosData.items ?? []) {
-    const iso8601Duration = video.contentDetails?.duration ?? "";
-    const durationSeconds = parseISO8601Duration(iso8601Duration);
-    const viewCount = Number(video.statistics?.viewCount ?? 0);
-    const publishedAt = video.snippet?.publishedAt ?? null;
-
-    candidates.push({
-      video_id: video.id,
-      title: video.snippet?.title ?? "",
-      channel_name: video.snippet?.channelTitle ?? "",
-      view_count: viewCount,
-      duration_seconds: durationSeconds,
-      published_at: publishedAt,
-      description: video.snippet?.description ?? "",
-    });
-  }
-
-  return candidates;
-}
-
-function parseISO8601Duration(duration: string): number {
-  const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-  if (!match) return 0;
-
-  const hours = match[1] ? parseInt(match[1], 10) : 0;
-  const minutes = match[2] ? parseInt(match[2], 10) : 0;
-  const seconds = match[3] ? parseInt(match[3], 10) : 0;
-  return hours * 3600 + minutes * 60 + seconds;
-}
-
-function getPublishedAfter(): string {
-  const date = new Date();
-  date.setFullYear(date.getFullYear() - 2);
-  return date.toISOString();
-}
-
-// --- Embedding helpers ---
+// --- Per-skill indexing ---
 async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   const { createEmbeddingModel } = await import("@/lib/ai/provider");
@@ -347,7 +298,8 @@ async function indexSkill(
     throw new Error("Supabase client is null");
   }
   // 1. Search YouTube
-  const candidates = await searchYouTubeVideos(skill, youtubeApiKey);
+  const youtubeClient = createYouTubeClient();
+  const candidates = await youtubeClient.searchVideos(skill, 14);
   if (candidates.length === 0) {
     await supabase
       .from("skill_index_status")
@@ -363,13 +315,7 @@ async function indexSkill(
     return { videos: 0, chunks: 0, chapters: 0, lessons: 0, lessonGenerateMs: 0, status: "skipped_no_results" };
   }
 
-  const filtered = candidates.filter((c) => {
-    if (c.view_count <= MIN_VIEW_COUNT) return false;
-    if (c.duration_seconds <= MIN_DURATION_SECONDS) return false;
-    if (TITLE_EXCLUDE_PATTERN.test(c.title)) return false;
-    return true;
-  });
-
+  const filtered = filterCandidates(candidates);
   const selected = filtered.slice(0, MAX_VIDEOS_PER_SKILL);
   if (selected.length === 0) {
     const diag = `no_selected: candidates=${candidates.length} filtered=${filtered.length} (view>${MIN_VIEW_COUNT}, dur>${MIN_DURATION_SECONDS}s, titleExclude=${TITLE_EXCLUDE_PATTERN.source})`;
@@ -405,6 +351,9 @@ async function indexSkill(
   let totalChunks = 0;
   let totalLessons = 0;
   let lessonGenerateMs = 0;
+  let videosWithData = 0;
+  let videosWithoutData = 0;
+  const failedVideoReasons: string[] = [];
 
   // 4. Process each new video: chapters + transcript + lesson notes (Feature 5)
   for (let vi = 0; vi < newVideos.length; vi++) {
@@ -412,6 +361,8 @@ async function indexSkill(
     if (vi > 0) await new Promise((r) => setTimeout(r, 1800));
     // --- Chapters — decoupled persistence: chunks first, embeddings best-effort ---
     const chapters = parseChapters(video.description);
+    let chaptersPersisted = false;
+    let chapterPersistError: string | null = null;
     if (chapters.length > 0) {
       // 1. Persist chapters immediately without embeddings (embedding may be null if quota fails)
       try {
@@ -426,11 +377,15 @@ async function indexSkill(
           .upsert(chapterRowsWithoutEmbedding, { onConflict: "video_id,start_seconds" });
         if (chapterError) {
           console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, chapterError);
+          chapterPersistError = chapterError.message;
         } else {
           totalChapters += chapters.length;
+          chaptersPersisted = true;
         }
       } catch (err) {
-        console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[tutorial-index] Chapter upsert (without embedding) failed for ${video.video_id}:`, msg);
+        chapterPersistError = msg;
       }
       // Embedding is best-effort and runs AFTER lesson generation so a quota
       // exhaustion or timeout during embedding does not block lesson init.
@@ -439,7 +394,10 @@ async function indexSkill(
     // --- Transcript ---
     let transcriptChunks: TranscriptChunk[] = [];
     try {
-      const transcript = await fetchTranscript(video.video_id);
+      const transcript = await withRetry(() => fetchTranscript(video.video_id), {
+        attempts: 2,
+        delayMs: 4000,
+      });
       const rawChunks = chunkTranscript(
         transcript.map((t) => ({ offset: t.offset, text: t.text }))
       );
@@ -452,6 +410,8 @@ async function indexSkill(
       }
     }
 
+    let chunksPersisted = false;
+    let chunkPersistError: string | null = null;
     if (transcriptChunks.length > 0) {
       // 1. Persist chunks immediately with null embedding — lesson generation uses chunk_text, not embeddings
       try {
@@ -471,11 +431,15 @@ async function indexSkill(
           .upsert(chunkRowsWithoutEmbedding, { onConflict: "video_id,start_seconds,skill_tag" });
         if (chunkError) {
           console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, chunkError);
+          chunkPersistError = chunkError.message;
         } else {
           totalChunks += transcriptChunks.length;
+          chunksPersisted = true;
         }
       } catch (err) {
-        console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[tutorial-index] Chunk upsert (without embedding) failed for ${video.video_id}:`, msg);
+        chunkPersistError = msg;
       }
       // Embedding is best-effort and runs AFTER lesson generation so a quota
       // exhaustion or timeout during embedding does not block lesson init.
@@ -688,6 +652,27 @@ async function indexSkill(
         console.warn(`[tutorial-index] Chunk embedding best-effort failed for ${video.video_id}, chunks persisted without embeddings:`, (err as Error).message);
       }
     }
+
+    const videoProducedData =
+      (chapters.length > 0 && chaptersPersisted) ||
+      (transcriptChunks.length > 0 && chunksPersisted);
+    if (videoProducedData) {
+      videosWithData++;
+    } else {
+      videosWithoutData++;
+      const reasons: string[] = [];
+      if (chapters.length === 0) {
+        reasons.push("no chapters parsed");
+      } else if (!chaptersPersisted) {
+        reasons.push(`chapters persist failed${chapterPersistError ? `: ${chapterPersistError}` : ""}`);
+      }
+      if (transcriptChunks.length === 0) {
+        reasons.push("transcript unavailable");
+      } else if (!chunksPersisted) {
+        reasons.push(`chunks persist failed${chunkPersistError ? `: ${chunkPersistError}` : ""}`);
+      }
+      failedVideoReasons.push(`${video.video_id}: ${reasons.join(", ")}`);
+    }
   }
 
   // --- Backfill: regenerate stale lessons and fill missing (Fix 1 + Fix 2 backfill) ---
@@ -885,6 +870,45 @@ async function indexSkill(
     .select("id", { count: "exact", head: true })
     .eq("skill_tag", skill);
 
+  const hasExistingData = (chunkCount ?? 0) > 0 || (chapterVideos ?? 0) > 0;
+  const producedNewData = totalChunks > 0 || totalChapters > 0;
+
+  let runStatus: string;
+  let runError: string | null;
+
+  if (hasExistingData && producedNewData && videosWithoutData > 0) {
+    runStatus = "partial";
+    const sampleReasons = failedVideoReasons.slice(0, 3).join("; ");
+    runError = `${videosWithData} of ${newVideos.length} new videos produced data; ${videosWithoutData} failed (${sampleReasons})`;
+  } else if (hasExistingData && producedNewData) {
+    runStatus = "success";
+    runError = null;
+  } else if (hasExistingData && !producedNewData) {
+    if (newVideos.length > 0) {
+      // New videos were attempted but every one failed — not a success.
+      runStatus = "failed";
+      runError = `${videosWithoutData} new videos all failed (${failedVideoReasons.slice(0, 3).join("; ")})`;
+    } else {
+      // All selected videos were already indexed; no new data needed this run.
+      runStatus = "success";
+      runError = null;
+    }
+  } else if (!hasExistingData && producedNewData) {
+    runStatus = "success";
+    runError = null;
+  } else if (!hasExistingData && !producedNewData && selected.length > 0) {
+    if (videosWithoutData > 0) {
+      runStatus = "failed";
+      runError = `${videosWithoutData} new videos all failed (${failedVideoReasons.slice(0, 3).join("; ")})`;
+    } else {
+      runStatus = "success_empty";
+      runError = `${selected.length} videos found, transcripts unavailable for all`;
+    }
+  } else {
+    runStatus = "skipped_no_results";
+    runError = null;
+  }
+
   await supabase
     .from("skill_index_status")
     .upsert(
@@ -894,14 +918,14 @@ async function indexSkill(
         gap_mentions_30d: gapCounts.get(skill) ?? 0,
         total_chunks: chunkCount ?? 0,
         total_chapters: chapterVideos ?? 0,
-        last_run_status: "success",
-        last_error: null,
+        last_run_status: runStatus,
+        last_error: runError,
       },
       { onConflict: "skill" }
     );
 
   console.info(
-    `[tutorial-index] Skill "${skill}" lessons: ${totalLessons} generated in ${lessonGenerateMs}ms`
+    `[tutorial-index] Skill "${skill}" status=${runStatus} videos=${selected.length} new=${newVideos.length} withData=${videosWithData} withoutData=${videosWithoutData} lessons: ${totalLessons} generated in ${lessonGenerateMs}ms`
   );
 
   return {
@@ -910,7 +934,7 @@ async function indexSkill(
     chapters: totalChapters,
     lessons: totalLessons,
     lessonGenerateMs,
-    status: "success",
+    status: runStatus,
   };
 }
 
@@ -1002,9 +1026,18 @@ export async function GET(req: Request) {
   const prioritized = scored.filter((s) => !reserved.includes(s));
   let selected = [...reserved, ...prioritized].slice(0, WEEKLY_INDEX_BUDGET);
   if (canarySkill) {
-    const norm = canarySkill.toLowerCase().trim();
-    const found = scored.find((s) => s.skill.toLowerCase() === norm);
-    selected = found ? [found] : [{ skill: norm, gapMentions: 0, lastIndexedAt: null }];
+    // Validate against the skill dictionary (same pattern as the ondemand
+    // route): an unknown value must be rejected, never indexed verbatim —
+    // a pasted Gap object here once wrote JSON skill_tags for two videos.
+    const normalized = normalizeSkill(canarySkill);
+    if (!normalized || !ALL_SKILLS.includes(normalized)) {
+      return NextResponse.json(
+        { error: `Unknown skill: ${canarySkill}. Must be one of: ${ALL_SKILLS.join(", ")}` },
+        { status: 400 }
+      );
+    }
+    const found = scored.find((s) => s.skill.toLowerCase() === normalized);
+    selected = found ? [found] : [{ skill: normalized, gapMentions: 0, lastIndexedAt: null }];
   } else if (canaryLimit) {
     const n = Math.min(Math.max(parseInt(canaryLimit, 10) || WEEKLY_INDEX_BUDGET, 1), WEEKLY_INDEX_BUDGET);
     selected = selected.slice(0, n);

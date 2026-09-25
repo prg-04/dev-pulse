@@ -69,16 +69,32 @@ export async function POST(req: NextRequest) {
 
   // Check if we have any indexed data for this skill — fetch up to 50 video_ids
   // to use as filter for chapter search (fixes prior limit(1) bug that capped results to 1 video)
-  const { data: chunkRowsFull } = await supabase
+  const { data: chunkRowsFull, error: chunkRowsError } = await supabase
     .from("tutorial_chunks")
     .select("video_id")
     .eq("skill_tag", skill)
     .limit(50);
 
-  const hasIndexedData = chunkRowsFull && chunkRowsFull.length > 0;
+  if (chunkRowsError) {
+    console.error("tutorial-search indexed-data lookup failed", chunkRowsError);
+    return NextResponse.json({ error: "Failed to check indexed tutorials" }, { status: 500 });
+  }
 
-  // If no indexed data, return mock tutorials for local development
-  if (!hasIndexedData) {
+  const { data: chapterCheck, error: chapterCheckError } = await supabase
+    .from("tutorial_chapters")
+    .select("video_id")
+    .limit(1);
+  if (chapterCheckError) {
+    console.error("tutorial-search indexed-data lookup failed", chapterCheckError);
+    return NextResponse.json({ error: "Failed to check indexed tutorials" }, { status: 500 });
+  }
+  const hasIndexedData =
+    (chunkRowsFull && chunkRowsFull.length > 0) || (chapterCheck != null && chapterCheck.length > 0);
+
+  // If no indexed data, return mock tutorials ONLY in local development.
+  // Production must not serve synthetic data as if it were real search results.
+  const allowMockTutorials = process.env.NEXT_PUBLIC_ENV === "development";
+  if (!hasIndexedData && allowMockTutorials) {
     const mockTutorials = getMockTutorials(skill);
     if (mockTutorials.length > 0) {
       return NextResponse.json({
@@ -93,6 +109,10 @@ export async function POST(req: NextRequest) {
         })),
       }, { status: 200 });
     }
+    return NextResponse.json({ results: [] }, { status: 200 });
+  }
+
+  if (!hasIndexedData) {
     return NextResponse.json({ results: [] }, { status: 200 });
   }
 

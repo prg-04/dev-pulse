@@ -13,7 +13,6 @@ type Props = {
 
 export function AITrendIntelligence({ skills, range, data, defaultSkills, marketMovers }: Props) {
   const [summary, setSummary] = useState<string | null>(null);
-  const [confidence, setConfidence] = useState<string>("98.4%");
   const [loading, setLoading] = useState(false);
 
   const isMarketView = useMemo(
@@ -36,7 +35,6 @@ export function AITrendIntelligence({ skills, range, data, defaultSkills, market
         const json = await res.json() as { summary?: string; confidence?: number };
         if (!cancelled && json.summary) {
           setSummary(json.summary);
-          if (json.confidence) setConfidence(`${json.confidence}%`);
         }
       } catch {
         // fallback remains
@@ -76,7 +74,6 @@ export function AITrendIntelligence({ skills, range, data, defaultSkills, market
       </p>
       <div className="mt-4 flex flex-col gap-1 border-t border-[#1E293B] pt-3 text-[11px] text-[#475569] sm:flex-row sm:items-center sm:justify-between">
         <span>Generated from {range === "3M" ? "3" : range === "6M" ? "6" : "12"} months of job posting data · Updated daily</span>
-        <span>Confidence score: <span className="text-[#2DD4BF]">{confidence}</span></span>
       </div>
     </div>
   );

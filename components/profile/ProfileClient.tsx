@@ -146,6 +146,7 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
       }
       const json = await res.json();
       if (json.profile) setProfile((p) => ({ ...p, ...json.profile }));
+      window.dispatchEvent(new CustomEvent("devpulse:profile-updated"));
 
       const aRes = await fetch("/api/alert-preferences", {
         method: "PUT",

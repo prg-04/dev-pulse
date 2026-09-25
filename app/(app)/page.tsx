@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { StatCards } from "@/components/dashboard/StatCards";
 import { DashboardTopSkills } from "@/components/dashboard/DashboardTopSkills";
@@ -8,6 +9,8 @@ import { getLatestMonth, getTopSkillsWithDelta, getSourcesBreakdown, getBiggestM
 import { getTrendsData, buildMonthsBack } from "@/lib/queries/trends";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Skill Demand Dashboard" };
 
 function formatMonthLabel(ym: string): string {
   const d = new Date(ym + "-01T00:00:00Z");

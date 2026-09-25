@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { TrendsClient } from "@/components/trends/TrendsClient";
 import { buildMonthsBack, getTrendsData } from "@/lib/queries/trends";
 import { getLatestMonth, getTopSkillsWithDelta, getBiggestMovers } from "@/lib/queries/dashboard";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Skill Trends" };
 
 export default async function TrendsPage() {
   let initialData: {

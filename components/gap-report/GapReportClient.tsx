@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { YourSkillsPanel } from "./YourSkillsPanel";
 import { MarketAlignmentCard } from "./MarketAlignmentCard";
@@ -30,7 +30,17 @@ type Report = {
   yourSkills: string[];
   totalPostings: number;
   monthLabel: string;
+  skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null }>;
 };
+
+export function shouldEnqueueSkill(
+  skill: string,
+  status: Report["skillIndexStatus"][string] | undefined,
+  enqueuedSet: Set<string>
+): boolean {
+  const hasData = (status?.total_chunks ?? 0) > 0 || (status?.total_chapters ?? 0) > 0;
+  return !hasData && !enqueuedSet.has(skill);
+}
 
 export function GapReportClient({ initialReport }: { initialReport: Report }) {
   const router = useRouter();
@@ -38,6 +48,34 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
   const [skills, setSkills] = useState<string[]>(initialReport.yourSkills);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const enqueuedRef = useRef<Set<string>>(new Set());
+
+  // Enqueue discovery requests once per mount for gap skills that have no
+  // indexed data yet. The thin on-demand endpoint just inserts into
+  // discovery_requests; the video-discovery cron picks it up.
+  useEffect(() => {
+    const skillsToEnqueue = report.gaps
+      .filter((g) => shouldEnqueueSkill(g.skill, report.skillIndexStatus[g.skill], enqueuedRef.current))
+      .map((g) => g.skill);
+
+    if (skillsToEnqueue.length === 0) return;
+
+    skillsToEnqueue.forEach((skill) => {
+      enqueuedRef.current.add(skill);
+      fetch("/api/cron/tutorial-index/ondemand", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skill }),
+      }).then((res) => {
+        if (!res.ok) {
+          throw new Error(`Enqueue failed: ${res.status}`);
+        }
+      }).catch((err) => {
+        console.error(`[GapReportClient] Enqueue failed for ${skill}:`, err);
+        enqueuedRef.current.delete(skill);
+      });
+    });
+  }, [report.gaps, report.skillIndexStatus]);
 
   const handleRemove = (skill: string) => {
     setSkills((prev) => prev.filter((s) => s !== skill));
@@ -66,6 +104,7 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
             rising: data.rising ?? prev.rising,
             declining: data.declining ?? prev.declining,
             recommendations: data.recommendations ?? prev.recommendations,
+            skillIndexStatus: data.skill_index_status ?? prev.skillIndexStatus,
           }));
           if (overrideSkills) setSkills(overrideSkills);
         }
@@ -135,7 +174,7 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
 
         <StrengthsCard strengths={report.strengths} summary={report.strengthsSummary} />
 
-        <SkillsToConsiderCard gaps={report.gaps} />
+        <SkillsToConsiderCard gaps={report.gaps} skillIndexStatus={report.skillIndexStatus} indexingSkills={new Set()} />
 
         <RisingCard items={report.rising} summary={report.risingSummary} />
 

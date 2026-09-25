@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { GapReportClient } from "@/components/gap-report/GapReportClient";
 import { marketAlignmentPct } from "@/lib/matching";
 import { normalizeSkill } from "@/lib/skills-dictionary";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = { title: "Skill Gap Report" };
 
 export default async function GapReportPage() {
   let report: {
@@ -23,6 +26,7 @@ export default async function GapReportPage() {
     yourSkills: string[];
     totalPostings: number;
     monthLabel: string;
+    skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }>;
   } = {
     marketAlignmentPct: 0,
     index: 0,
@@ -40,6 +44,7 @@ export default async function GapReportPage() {
     yourSkills: [],
     totalPostings: 0,
     monthLabel: "No data",
+    skillIndexStatus: {},
   };
 
   try {
@@ -129,6 +134,24 @@ export default async function GapReportPage() {
         const { count } = await supabase.from("job_postings").select("id", { count: "exact", head: true });
         const monthLabel = now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
+        // Fetch indexing status for gap skills so the client can decide whether
+        // to auto-trigger on-demand indexing (Option B).
+        const gapSkills = gaps.map((g) => g.skill);
+        const { data: indexStatusRows } = await supabase
+          .from("skill_index_status")
+          .select("skill, total_chunks, total_chapters, last_run_status, last_error, on_demand_requested_at")
+          .in("skill", gapSkills);
+        const skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }> = {};
+        for (const row of indexStatusRows ?? []) {
+          skillIndexStatus[row.skill] = {
+            total_chunks: row.total_chunks ?? 0,
+            total_chapters: row.total_chapters ?? 0,
+            last_run_status: row.last_run_status ?? null,
+            last_error: row.last_error ?? null,
+            on_demand_requested_at: row.on_demand_requested_at ?? null,
+          };
+        }
+
         report = {
           marketAlignmentPct: alignment,
           index: alignment / 100,
@@ -146,6 +169,7 @@ export default async function GapReportPage() {
           recommendations: [],
           totalPostings: typeof count === "number" && count > 0 ? count : 0,
           monthLabel,
+          skillIndexStatus,
         };
       }
     }

@@ -77,9 +77,9 @@ Write one paragraph (2-3 sentences) describing the most notable trend visible fo
     });
 
     const summary = result?.text?.trim() || fallbackSummary(skills, range);
-    return NextResponse.json({ summary, confidence: 98.4 });
+    return NextResponse.json({ summary });
   } catch {
     // If AI call fails (missing gateway key, provider error), fallback
-    return NextResponse.json({ summary: fallbackSummary(skills, range), confidence: 98.4 });
+    return NextResponse.json({ summary: fallbackSummary(skills, range) });
   }
 }

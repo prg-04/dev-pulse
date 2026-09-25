@@ -84,7 +84,8 @@ function loadYouTubeIframeAPI(): Promise<void> {
 }
 
 const lessonCache = new Map<string, VideoLesson>();
-const lessonErrorCache = new Map<string, string>();
+type LessonError = { title: string; detail: string };
+const lessonErrorCache = new Map<string, LessonError>();
 
 export function LessonTheater({
   tutorial,
@@ -97,7 +98,7 @@ export function LessonTheater({
 }) {
   const [lesson, setLesson] = useState<VideoLesson | null>(null);
   const [lessonLoading, setLessonLoading] = useState(false);
-  const [lessonError, setLessonError] = useState<string | null>(null);
+  const [lessonError, setLessonError] = useState<LessonError | null>(null);
   const [currentTime, setCurrentTime] = useState(tutorial.start_seconds);
   const [mounted, setMounted] = useState(false);
   const [videoUnavailable, setVideoUnavailable] = useState(false);
@@ -151,32 +152,56 @@ export function LessonTheater({
     try {
       const res = await fetch(`/api/tutorial-lessons/${tutorial.video_id}`);
       if (res.status === 404) {
-        const msg = "Notes not available for this video";
-        lessonErrorCache.set(tutorial.video_id, msg);
-        setLessonError(msg);
+        const err: LessonError = {
+          title: "Notes not available for this video yet",
+          detail: "This video hasn't been processed yet — check back soon.",
+        };
+        lessonErrorCache.set(tutorial.video_id, err);
+        setLessonError(err);
         setLesson(null);
         return;
       }
       if (res.status === 202) {
         const j = (await res.json().catch(() => ({}))) as { error?: string; reason?: string };
-        const msg = j.error ?? j.reason ?? "Notes are still being generated";
         // Do not cache 202 — the lesson may complete on a subsequent cron run,
         // so we want the next open to refetch rather than show a stale message.
-        setLessonError(msg);
+        setLessonError({
+          title: j.error ?? j.reason ?? "Notes are still being generated",
+          detail: "Lesson notes are being generated — check back shortly.",
+        });
         setLesson(null);
         return;
       }
       if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error((j as { error?: string }).error ?? `Failed: ${res.status}`);
+        const j = (await res.json().catch(() => ({}))) as { error?: string; status?: string };
+        const isFailed =
+          res.status === 500 &&
+          (j.status === "failed" || (j.error ?? "").includes("Lesson generation failed"));
+        const err: LessonError = isFailed
+          ? {
+              title: "Lesson notes couldn't be generated",
+              detail:
+                "Lesson generation failed for this video. It may be retried automatically — check back later.",
+            }
+          : {
+              title: j.error ?? `Failed: ${res.status}`,
+              detail: "Something went wrong while loading these notes. Please try again later.",
+            };
+        lessonErrorCache.set(tutorial.video_id, err);
+        setLessonError(err);
+        setLesson(null);
+        return;
       }
       const data = (await res.json()) as VideoLesson;
       lessonCache.set(tutorial.video_id, data);
       setLesson(data);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed to load lesson";
-      lessonErrorCache.set(tutorial.video_id, msg);
-      setLessonError(msg);
+      const err: LessonError = {
+        title: e instanceof Error ? e.message : "Failed to load lesson",
+        detail: "Something went wrong while loading these notes. Please try again later.",
+      };
+      lessonErrorCache.set(tutorial.video_id, err);
+      setLessonError(err);
     } finally {
       setLessonLoading(false);
     }
@@ -378,9 +403,9 @@ export function LessonTheater({
                   )}
                   {lessonError && !lessonLoading && (
                     <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-4">
-                      <p className="text-xs font-medium text-amber-200">{lessonError}</p>
+                      <p className="text-xs font-medium text-amber-200">{lessonError.title}</p>
                       <p className="mt-1 text-[11px] text-amber-200/70">
-                        This video has not been indexed yet or the lesson generation failed. It will be available after the next weekly tutorial-index run.
+                        {lessonError.detail}
                       </p>
                     </div>
                   )}
