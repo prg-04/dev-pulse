@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/cron/tutorial-lesson-step",
-      "schedule": "0 * * * *"
+      "schedule": "0 10 * * *"
     },
     {
       "path": "/api/cron/github-sync",
