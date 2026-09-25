@@ -80,10 +80,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Failed to check indexed tutorials" }, { status: 500 });
   }
 
-  const { data: chapterCheck } = await supabase
+  const { data: chapterCheck, error: chapterCheckError } = await supabase
     .from("tutorial_chapters")
     .select("video_id")
     .limit(1);
+  if (chapterCheckError) {
+    console.error("tutorial-search indexed-data lookup failed", chapterCheckError);
+    return NextResponse.json({ error: "Failed to check indexed tutorials" }, { status: 500 });
+  }
   const hasIndexedData =
     (chunkRowsFull && chunkRowsFull.length > 0) || (chapterCheck != null && chapterCheck.length > 0);
 
