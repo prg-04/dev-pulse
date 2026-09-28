@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 
 type Range = "3M" | "6M" | "12M";
 
+const RANGE_MONTHS: Record<Range, number> = { "3M": 3, "6M": 6, "12M": 12 };
+
 type Props = {
   initialData: {
     "3M": Record<string, string | number>[];
@@ -26,7 +28,8 @@ type FetchedPayload = {
 };
 
 function sliceForRange(range: Range, rows: Record<string, string | number>[], skills: string[]) {
-  return rows.map((row) => {
+  const windowed = rows.slice(-RANGE_MONTHS[range]);
+  return windowed.map((row) => {
     const out: Record<string, string | number> = { month: row.month };
     skills.forEach((s) => {
       out[s] = row[s] as number;
@@ -49,6 +52,7 @@ export function TrendsClient({ initialData, initialSkills, marketMovers }: Props
 
     const params = new URLSearchParams();
     params.set("skills", selected.join(","));
+    params.set("monthsCount", String(RANGE_MONTHS[range]));
     const url = `/api/trends?${params.toString()}`;
     console.log("[trends] fetch", url, "skills=", selected);
     fetch(url)
@@ -71,7 +75,7 @@ export function TrendsClient({ initialData, initialSkills, marketMovers }: Props
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, range]);
 
   const chartData = useMemo(() => sliceForRange(range, data.rows, selected), [range, data.rows, selected]);
 

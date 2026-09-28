@@ -79,6 +79,13 @@ function parseISOString(value: string | null): Date {
 
 // Parse timestamp lines from YouTube description.
 // Requires at least CHAPTER_MIN_LINES matching lines in ascending time order.
+function cleanChapterLabel(label: string): string | null {
+  const t = label.trim().replace(/^[-*•·|>]+/, "").trim();
+  if (t.length < 3) return null;
+  if (/^[\p{P}\p{S}\s]+$/u.test(t)) return null;
+  return t;
+}
+
 function parseChapters(description: string): ParsedChapter[] {
   const lines = description.split("\n");
   const chapters: ParsedChapter[] = [];
@@ -93,10 +100,11 @@ function parseChapters(description: string): ParsedChapter[] {
     const seconds = parseInt(match[3], 10);
     const label = match[4].trim();
 
-    if (!label) continue;
+    const cleaned = cleanChapterLabel(label);
+    if (!cleaned) continue;
 
     const startSeconds = hours * 3600 + minutes * 60 + seconds;
-    chapters.push({ start_seconds: startSeconds, label });
+    chapters.push({ start_seconds: startSeconds, label: cleaned });
   }
 
   if (chapters.length < CHAPTER_MIN_LINES) {

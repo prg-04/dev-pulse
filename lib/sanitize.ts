@@ -35,3 +35,20 @@ export function stripHtml(value: string | null | undefined): string {
   text = text.replace(/\n{3,}/g, "\n\n");
   return text.trim();
 }
+
+export function escapeHtml(value: string | null | undefined): string {
+  if (!value) return "";
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+export function sanitizeHttpUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return null;
+}

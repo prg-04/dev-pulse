@@ -46,3 +46,14 @@ export function computeRisingDeclining(
   const declining = deltas.filter((d) => d.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 2);
   return { rising, declining };
 }
+
+export function getCurrentAndPreviousMonth(now: Date = new Date()): {
+  currentMonth: string;
+  prevMonth: string;
+} {
+  const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return {
+    currentMonth: fmt(now),
+    prevMonth: fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+  };
+}

@@ -12,7 +12,8 @@ vi.mock("server-only", () => ({}));
 let maybeSingleMock: ReturnType<typeof vi.fn>;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockServiceRole: any = {
+const mockSession: any = {
+  auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
   from: vi.fn(() => ({
     select: vi.fn(() => ({
       eq: vi.fn(() => ({
@@ -23,13 +24,7 @@ const mockServiceRole: any = {
 };
 
 vi.mock("@/lib/supabase/server", () => ({
-  createClient: vi.fn().mockResolvedValue({
-    auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
-  }),
-}));
-
-vi.mock("@/lib/supabase/service-role", () => ({
-  createServiceRoleClient: vi.fn().mockReturnValue(mockServiceRole),
+  createClient: vi.fn().mockResolvedValue(mockSession),
 }));
 
 // ---------------------------------------------------------------------------
@@ -39,8 +34,8 @@ describe("GET /api/tutorial-lessons/[video_id]", () => {
   beforeEach(() => {
     vi.resetModules();
     maybeSingleMock = vi.fn();
-    mockServiceRole.from.mockClear();
-    mockServiceRole.from.mockReturnValue({
+    mockSession.from.mockClear();
+    mockSession.from.mockReturnValue({
       select: vi.fn(() => ({
         eq: vi.fn(() => ({
           maybeSingle: maybeSingleMock,

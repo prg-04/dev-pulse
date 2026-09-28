@@ -176,7 +176,7 @@ Auth flow: email → Supabase sends magic link → click → `@supabase/ssr` coo
 │   ├── profile/ProfileClient.tsx
 │   └── ui/{button,card,chart}.tsx
 ├── lib/
-│   ├── skills-dictionary.ts  # 28 skills + aliases — single source of truth
+│   ├── skills-dictionary.ts  # 50 skills + aliases — single source of truth
 │   ├── matching.ts           # marketAlignmentPct + stackMatchPct + computeRisingDeclining
 │   ├── ai/provider.ts        # provider resolution + createTextModel/createEmbeddingModel
 │   ├── queries/{dashboard,jobs,trends}.ts  # pre-aggregated reads only
@@ -303,7 +303,7 @@ Both are `Math.round` integer percentages. `computeRisingDeclining(history, skil
 
 ## Skill Dictionary
 
-Single source of truth: `lib/skills-dictionary.ts` — **28 canonical skills**. Every subsystem (ingestion extraction, GitHub sync, Skills page validation, tutorial indexer rotation, stack-match/market-alignment) draws from this one table so a skill typed on Skills page reliably matches one extracted from a job posting.
+Single source of truth: `lib/skills-dictionary.ts` — **50 canonical skills**. Every subsystem (ingestion extraction, GitHub sync, Skills page validation, tutorial indexer rotation, stack-match/market-alignment) draws from this one table so a skill typed on Skills page reliably matches one extracted from a job posting.
 
 | Canonical | Aliases | | Canonical | Aliases |
 |-----------|---------|-|-----------|---------|
@@ -311,16 +311,28 @@ Single source of truth: `lib/skills-dictionary.ts` — **28 canonical skills**. 
 | `javascript` | `js` | | `rust` | — |
 | `react` | `react.js` | | `java` | — |
 | `next.js` | `nextjs`, `next` | | `c++` | `cpp` |
+| `c` | — | | `c#` | — |
 | `vue` | `vue.js` | | `swift` | — |
 | `angular` | — | | `kotlin` | — |
 | `svelte` | — | | `flutter` | — |
+| `dart` | — | | `react-native` | `reactnative` |
+| `android` | — | | `ios` | — |
 | `node.js` | `node`, `nodejs` | | `django` | — |
 | `python` | — | | `laravel` | — |
+| `ruby` | — | | `rails` | `ruby-on-rails`, `ror` |
+| `spring` | `spring boot`, `springboot` | | `.net` | `dotnet`, `asp.net` |
+| `express` | `express.js`, `expressjs` | | `flask` | — |
+| `fastapi` | `fast api` | | `nestjs` | `nest.js` |
 | | | | `elixir` | — |
+| `php` | — | | `scala` | — |
 | `graphql` | `gql` | | `tailwindcss` | `tailwind` |
+| `html` | `html5` | | `css` | `css3` |
 | `postgresql` | `postgres`, `psql` | | `mongodb` | `mongo` |
+| `mysql` | — | | `sqlite` | `sqlite3` |
 | `redis` | — | | `docker` | — |
 | `kubernetes` | `k8s` | | `aws` | `amazon web services` |
+| `gcp` | `google cloud` | | `azure` | `microsoft azure` |
+| `terraform` | — | | | |
 
 - Stored lowercase (`typescript` not `TypeScript`); helpers `normalizeSkill(input)` / `isKnownSkill(skill)`.
 - Ingestion regex: `\b{alias}\b` case-insensitive per alias; GitHub language/topic names go through the same table — anything not in it is discarded (e.g. `"Jupyter Notebook"` → `null`).

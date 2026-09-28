@@ -47,6 +47,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Controlled failure for live-data reads: a DB outage must never look
+  // like a successful report built from fallback values.
+  const dbUnavailable = (detail: string) => {
+    console.error(`[gap-report] live data unavailable for user ${user.id}: ${detail}`);
+    return NextResponse.json(
+      {
+        error: {
+          code: "DATA_UNAVAILABLE",
+          message: "Live market data is temporarily unavailable. Please try again.",
+        },
+      },
+      { status: 500 }
+    );
+  };
+
   // Try to load live data for deterministic computation
   let marketAlignment = mockGapReport.marketAlignmentPct;
   let strengths = mockGapReport.strengths;
@@ -60,15 +75,21 @@ export async function POST(req: NextRequest) {
   let top50: { skill: string; mention_count: number }[] = [];
   try {
     const supabase = await createClient();
-    if (supabase) {
+    if (!supabase) {
+      return dbUnavailable("supabase client unavailable (missing env)");
+    }
+    {
       const now = new Date();
       const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const { data: snapshot } = await supabase
+      const { data: snapshot, error: snapshotError } = await supabase
         .from("skill_demand_snapshots")
         .select("skill, mention_count")
         .eq("month", month)
         .order("mention_count", { ascending: false })
         .limit(50);
+      if (snapshotError) {
+        return dbUnavailable(`skill_demand_snapshots current-month select: ${snapshotError.message}`);
+      }
       if (snapshot && snapshot.length > 0) {
         top50 = snapshot as typeof top50;
         marketAlignment = marketAlignmentPct(skills, top50);
@@ -101,17 +122,15 @@ export async function POST(req: NextRequest) {
           const dt = new Date(now.getFullYear(), now.getMonth() - i, 1);
           months.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`);
         }
-        const { data: hist } = await supabase
+        const { data: hist, error: histError } = await supabase
           .from("skill_demand_snapshots")
           .select("skill, month, mention_count")
           .in("month", months)
           .order("month", { ascending: true });
+        if (histError) {
+          return dbUnavailable(`skill_demand_snapshots history select: ${histError.message}`);
+        }
         if (hist && hist.length > 0) {
-          const bySkill: Record<string, number[]> = {};
-          for (const row of hist as { skill: string; month: string; mention_count: number }[]) {
-            if (!bySkill[row.skill]) bySkill[row.skill] = [];
-            // ensure ordered by months array order - hist already ordered
-          }
           // group by skill with 2 values
           const map: Record<string, { prev: number; last: number }> = {};
           for (const r of hist as { skill: string; month: string; mention_count: number }[]) {
@@ -130,52 +149,76 @@ export async function POST(req: NextRequest) {
         }
 
         // total postings for this month: count job_postings ingested_at in month? fallback to sum counts
-        const { count } = await supabase
+        const { count, error: countError } = await supabase
           .from("job_postings")
           .select("id", { count: "exact", head: true });
+        if (countError) {
+          return dbUnavailable(`job_postings count select: ${countError.message}`);
+        }
         if (typeof count === "number" && count > 0) totalPostings = count;
         monthLabel = now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
-        // Fetch indexing status for gap skills (Option B: on-demand trigger support)
-        const gapSkills = gaps.map((g) => g.skill);
-        const { data: indexStatusRows } = await supabase
-          .from("skill_index_status")
-          .select("skill, total_chunks, total_chapters, last_run_status, last_error, on_demand_requested_at")
-          .in("skill", gapSkills);
-        for (const row of indexStatusRows ?? []) {
-          skillIndexStatus[row.skill] = {
-            total_chunks: row.total_chunks ?? 0,
-            total_chapters: row.total_chapters ?? 0,
-            last_run_status: row.last_run_status ?? null,
-            last_error: row.last_error ?? null,
-            on_demand_requested_at: row.on_demand_requested_at ?? null,
-          };
+        // Fetch indexing status for gap skills (Option B: on-demand trigger support).
+        // Auxiliary UX data only (drives the "Find a lesson" button state) —
+        // never report numbers. A failure here degrades to {} with a loud log
+        // rather than failing the whole report: e.g. prod is missing the
+        // on_demand_requested_at column (migration 013 unapplied) and that
+        // must not 500 gap submissions.
+        try {
+          const gapSkills = gaps.map((g) => g.skill);
+          const { data: indexStatusRows, error: indexStatusError } = await supabase
+            .from("skill_index_status")
+            .select("skill, total_chunks, total_chapters, last_run_status, last_error, on_demand_requested_at")
+            .in("skill", gapSkills);
+          if (indexStatusError) throw new Error(indexStatusError.message);
+          for (const row of indexStatusRows ?? []) {
+            skillIndexStatus[row.skill] = {
+              total_chunks: row.total_chunks ?? 0,
+              total_chapters: row.total_chapters ?? 0,
+              last_run_status: row.last_run_status ?? null,
+              last_error: row.last_error ?? null,
+              on_demand_requested_at: row.on_demand_requested_at ?? null,
+            };
+          }
+        } catch (err) {
+          console.error(`[gap-report] skill_index_status select degraded for user ${user.id}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
-  } catch {
-    // fallback to mock
+  } catch (err) {
+    return dbUnavailable(err instanceof Error ? err.message : String(err));
   }
 
-  // Persist snapshot + gap events (auth already validated above)
+  // Persist snapshot + gap events (auth already validated above).
+  // A failed history write must never block the user's report, but it is
+  // logged loudly: silent loss here degrades indexer priority and the
+  // Profile "active gaps" list with no visible cause.
   try {
     const supabase = await createClient();
-    if (supabase) {
-      await supabase.from("user_skill_profiles").insert({
+    if (!supabase) {
+      console.error(`[gap-report] persistence skipped for user ${user.id}: supabase client unavailable`);
+    } else {
+      const { error: profileError } = await supabase.from("user_skill_profiles").insert({
         user_id: user.id,
         target_role: target_role ?? null,
         skills,
       });
+      if (profileError) {
+        console.error(`[gap-report] user_skill_profiles insert failed for user ${user.id}: ${profileError.message}`);
+      }
       if (gaps.length > 0) {
         const events = gaps.map((g) => ({
           user_id: user.id,
           skill: normalizeSkill(g.skill) ?? g.skill.toLowerCase(),
         }));
-        await supabase.from("gap_report_events").insert(events);
+        const { error: eventsError } = await supabase.from("gap_report_events").insert(events);
+        if (eventsError) {
+          console.error(`[gap-report] gap_report_events insert failed for user ${user.id} (${events.length} events): ${eventsError.message}`);
+        }
       }
     }
-  } catch {
-    // ignore persistence errors
+  } catch (err) {
+    console.error(`[gap-report] persistence threw for user ${user.id}: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // AI synthesis for recommendations - grounded, fallback to mock if missing

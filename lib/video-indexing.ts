@@ -28,6 +28,13 @@ export interface IndexVideoResult {
 // Helpers (extracted from ondemand.ts and tutorial-index/route.ts)
 // ---------------------------------------------------------------------------
 
+function cleanChapterLabel(label: string): string | null {
+  const t = label.trim().replace(/^[-*•·|>]+/, "").trim();
+  if (t.length < 3) return null;
+  if (/^[\p{P}\p{S}\s]+$/u.test(t)) return null;
+  return t;
+}
+
 export function parseChapters(description: string): { start_seconds: number; label: string }[] {
   const lines = description.split("\n");
   const chapters: { start_seconds: number; label: string }[] = [];
@@ -42,10 +49,11 @@ export function parseChapters(description: string): { start_seconds: number; lab
     const seconds = parseInt(match[3], 10);
     const label = match[4].trim();
 
-    if (!label) continue;
+    const cleaned = cleanChapterLabel(label);
+    if (!cleaned) continue;
 
     const startSeconds = hours * 3600 + minutes * 60 + seconds;
-    chapters.push({ start_seconds: startSeconds, label });
+    chapters.push({ start_seconds: startSeconds, label: cleaned });
   }
 
   if (chapters.length < 3) {

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { Resend } from "resend";
-import { stackMatchPct } from "@/lib/matching";
+import { stackMatchPct, getCurrentAndPreviousMonth } from "@/lib/matching";
+import { escapeHtml, sanitizeHttpUrl } from "@/lib/sanitize";
 
 export const runtime = "nodejs";
 
@@ -201,15 +202,16 @@ async function processInstantMatchAlerts(
 
     try {
       const jobListHtml = newMatches
-        .map(
-          (j) =>
-            `<li><strong>${j.job.title}</strong> at ${j.job.company} — ${j.score}% match<br/><a href="${j.job.external_url}">View posting</a></li>`
-        )
+        .map((j) => {
+          const safeUrl = sanitizeHttpUrl(j.job.external_url);
+          const link = safeUrl ? `<br/><a href="${safeUrl}">View posting</a>` : "";
+          return `<li><strong>${escapeHtml(j.job.title)}</strong> at ${escapeHtml(j.job.company)} — ${j.score}% match${link}</li>`;
+        })
         .join("");
 
       const html = `
         <h2>New jobs matching your skills</h2>
-        <p>Hi ${profile.full_name},</p>
+        <p>Hi ${escapeHtml(profile.full_name)},</p>
         <p>${newMatches.length} new job posting${newMatches.length > 1 ? "s" : ""} scored ${pref.instant_match_threshold}%+ match with your skills:</p>
         <ul>${jobListHtml}</ul>
         <p>— DevPulse</p>
@@ -245,6 +247,43 @@ ${newMatches.map((j) => `- ${j.job.title} at ${j.job.company} — ${j.score}% ma
   return { sent, failed };
 }
 
+export interface SkillMoverRow {
+  skill: string;
+  mention_count: number;
+  month: string;
+  source: string;
+}
+
+// Pure month-over-month computation over exactly two months. Rows from any
+// other month are ignored entirely — this is the regression guard for the
+// month-mixing bug (an unconstrained top-50 let stale months contaminate
+// the "previous" bucket). Source stamping stays last-write-wins (known
+// follow-up, intentionally unchanged here).
+export function computeSkillMovers(
+  rows: SkillMoverRow[],
+  currentMonth: string,
+  prevMonth: string
+): Array<{ skill: string; delta: number; count: number; source: string }> {
+  const skillMap = new Map<string, { current: number; prev: number; source: string }>();
+  for (const row of rows) {
+    const existing = skillMap.get(row.skill) ?? { current: 0, prev: 0, source: row.source };
+    if (row.month === currentMonth) {
+      existing.current += row.mention_count;
+    } else if (row.month === prevMonth) {
+      existing.prev += row.mention_count;
+    }
+    existing.source = row.source;
+    skillMap.set(row.skill, existing);
+  }
+
+  return Array.from(skillMap.entries())
+    .map(([skill, data]) => {
+      const delta = data.prev === 0 ? (data.current > 0 ? 100 : 0) : Math.round(((data.current - data.prev) / data.prev) * 100);
+      return { skill, delta, count: data.current, source: data.source };
+    })
+    .sort((a, b) => b.delta - a.delta);
+}
+
 async function processWeeklyDigest(
   supabase: SupabaseClient,
   prefs: AlertPreference[],
@@ -254,32 +293,17 @@ async function processWeeklyDigest(
   let sent = 0;
   let failed = 0;
 
+  const { currentMonth, prevMonth } = getCurrentAndPreviousMonth();
   const { data: topSkills } = await supabase
     .from("skill_demand_snapshots")
     .select("skill, mention_count, month, source")
+    .in("month", [prevMonth, currentMonth])
     .order("mention_count", { ascending: false })
     .limit(50);
 
   if (!topSkills || topSkills.length === 0) return { sent, failed };
 
-  const skillMap = new Map<string, { current: number; prev: number; source: string }>();
-  for (const row of topSkills as { skill: string; mention_count: number; month: string; source: string }[]) {
-    const existing = skillMap.get(row.skill) ?? { current: 0, prev: 0, source: row.source };
-    if (row.month === getCurrentMonth()) {
-      existing.current += row.mention_count;
-    } else {
-      existing.prev += row.mention_count;
-    }
-    existing.source = row.source;
-    skillMap.set(row.skill, existing);
-  }
-
-  const movers = Array.from(skillMap.entries())
-    .map(([skill, data]) => {
-      const delta = data.prev === 0 ? (data.current > 0 ? 100 : 0) : Math.round(((data.current - data.prev) / data.prev) * 100);
-      return { skill, delta, count: data.current, source: data.source };
-    })
-    .sort((a, b) => b.delta - a.delta);
+  const movers = computeSkillMovers(topSkills as SkillMoverRow[], currentMonth, prevMonth);
 
   const rising = movers.filter((m) => m.delta > 0).slice(0, 3);
   const declining = movers.filter((m) => m.delta < 0).slice(0, 3);
@@ -299,12 +323,12 @@ async function processWeeklyDigest(
     const filteredDeclining = declining.filter((m) => userSources.includes(m.source));
 
     try {
-      const risingHtml = filteredRising.map((m) => `<li>${m.skill}: +${m.delta}%</li>`).join("");
-      const decliningHtml = filteredDeclining.map((m) => `<li>${m.skill}: ${m.delta}%</li>`).join("");
+      const risingHtml = filteredRising.map((m) => `<li>${escapeHtml(m.skill)}: +${m.delta}%</li>`).join("");
+      const decliningHtml = filteredDeclining.map((m) => `<li>${escapeHtml(m.skill)}: ${m.delta}%</li>`).join("");
 
       const html = `
         <h2>Weekly Market Digest</h2>
-        <p>Hi ${profile.full_name},</p>
+        <p>Hi ${escapeHtml(profile.full_name)},</p>
         <p>Here's your weekly skill demand update:</p>
         <h3>Rising</h3>
         <ul>${risingHtml || "<li>No rising skills this week</li>"}</ul>
@@ -402,13 +426,13 @@ async function processLearningGapDispatch(
       const skillsHtml = newSkills
         .map(
           (s) =>
-            `<li><strong>${s.skill}</strong> — ${s.total_chunks} tutorial chunks, ${s.total_chapters} chaptered videos</li>`
+            `<li><strong>${escapeHtml(s.skill)}</strong> — ${s.total_chunks} tutorial chunks, ${s.total_chapters} chaptered videos</li>`
         )
         .join("");
 
       const html = `
         <h2>New tutorials for your learning gaps</h2>
-        <p>Hi ${profile.full_name},</p>
+        <p>Hi ${escapeHtml(profile.full_name)},</p>
         <p>We've indexed new tutorials for ${newSkills.length} skill${newSkills.length > 1 ? "s" : ""} you flagged as gaps:</p>
         <ul>${skillsHtml}</ul>
         <p>Head to the Gap Report to explore them.</p>
@@ -445,11 +469,6 @@ Head to the Gap Report to explore them.
   }
 
   return { sent, failed };
-}
-
-function getCurrentMonth(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
 // --- Main Handler ---

@@ -22,7 +22,7 @@ export async function getTrendsData(
   const byMonth: Record<string, Record<string, number>> = {};
   months.forEach((m) => (byMonth[m] = {}));
   for (const row of (data ?? []) as { skill: string; month: string; mention_count: number }[]) {
-    if (byMonth[row.month]) byMonth[row.month][row.skill] = row.mention_count;
+    if (byMonth[row.month]) byMonth[row.month][row.skill] = (byMonth[row.month][row.skill] ?? 0) + row.mention_count;
   }
   const rows: TrendPoint[] = months.map((m) => {
     const vals = byMonth[m];

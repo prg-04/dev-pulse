@@ -43,7 +43,12 @@ function extractSkills(text: string): string[] {
   for (const entry of Object.values(SKILLS_DICTIONARY)) {
     for (const alias of entry.aliases) {
       const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(`\\b${escaped}\\b`, "i");
+      // A \b against a non-word character can never match, silently
+      // disabling the alias ("c++"/"c#" trailed one; ".net" leads one).
+      // Only assert a boundary where the alias actually has a word character.
+      const start = /^\w/.test(alias) ? "\\b" : "";
+      const end = /\w$/.test(alias) ? "\\b" : "";
+      const regex = new RegExp(`${start}${escaped}${end}`, "i");
       if (regex.test(lower)) {
         found.add(entry.canonical);
         break;

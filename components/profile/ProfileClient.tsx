@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Activity, Settings, Database, Layers, Radio, KeyRound, ShieldCheck, Zap, BarChart3, GraduationCap } from "lucide-react";
-import { normalizeSkill } from "@/lib/skills-dictionary";
+import { normalizeSkill, ALL_SKILLS, SKILLS_DICTIONARY } from "@/lib/skills-dictionary";
 
 type InitialData = {
   profile: {
@@ -107,9 +107,69 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
   const [includeEquity, setIncludeEquity] = useState(!!profile.include_equity);
   const [contractorPref, setContractorPref] = useState(profile.contractor_pref ?? "W8-BEN");
   const [newSkill, setNewSkill] = useState("");
+  const [committedSkill, setCommittedSkill] = useState<string | null>(null);
+  const [skillOpen, setSkillOpen] = useState(false);
+  const [skillHighlight, setSkillHighlight] = useState(-1);
   const [newSkillYears, setNewSkillYears] = useState("");
   const [newSkillTier, setNewSkillTier] = useState("");
   const [skillError, setSkillError] = useState<string | null>(null);
+
+  const skillSuggestions = (() => {
+    const lower = newSkill.trim().toLowerCase();
+    if (!lower) return [];
+    return ALL_SKILLS.filter((s) => {
+      if (skills.some((k) => k.skill === s)) return false;
+      if (s.includes(lower)) return true;
+      return SKILLS_DICTIONARY[s]?.aliases.some((a) => a.includes(lower)) ?? false;
+    }).slice(0, 6);
+  })();
+
+  function handleSkillInput(val: string) {
+    setNewSkill(val);
+    setSkillError(null);
+    setSkillHighlight(-1);
+    setSkillOpen(true);
+    const canonical = normalizeSkill(val);
+    setCommittedSkill(canonical && val.trim().toLowerCase() === canonical ? canonical : null);
+  }
+
+  function chooseSkill(skill: string) {
+    setNewSkill(skill);
+    setCommittedSkill(skill);
+    setSkillOpen(false);
+    setSkillHighlight(-1);
+    setSkillError(null);
+  }
+
+  function handleSkillKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" && skillSuggestions.length > 0) {
+      e.preventDefault();
+      setSkillOpen(true);
+      setSkillHighlight((h) => (h + 1) % skillSuggestions.length);
+      return;
+    }
+    if (e.key === "ArrowUp" && skillSuggestions.length > 0) {
+      e.preventDefault();
+      setSkillHighlight((h) => (h <= 0 ? skillSuggestions.length - 1 : h - 1));
+      return;
+    }
+    if (e.key === "Escape") {
+      setSkillOpen(false);
+      setSkillHighlight(-1);
+      return;
+    }
+    if (e.key === "Enter" && newSkill.trim()) {
+      e.preventDefault();
+      const pick = skillHighlight >= 0 && skillHighlight < skillSuggestions.length
+        ? skillSuggestions[skillHighlight]
+        : skillSuggestions[0];
+      if (pick) {
+        chooseSkill(pick);
+      } else {
+        setSkillError("Pick a skill from the list — free text is not accepted");
+      }
+    }
+  }
 
   function toggleSource(src: string) {
     setProfile((p) => ({
@@ -170,11 +230,10 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
 
   async function handleAddSkill() {
     setSkillError(null);
-    const canonical = normalizeSkill(newSkill);
-    if (!canonical) {
-      setSkillError("Unknown skill — not in dictionary");
-      return;
-    }
+    // Button is disabled unless a skill is committed and the server
+    // re-validates the dictionary — this narrowing is type-only.
+    const canonical = committedSkill;
+    if (!canonical) return;
     const res = await fetch("/api/profile/skills", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -202,6 +261,9 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
       router.refresh();
     }
     setNewSkill("");
+    setCommittedSkill(null);
+    setSkillOpen(false);
+    setSkillHighlight(-1);
     setNewSkillYears("");
     setNewSkillTier("");
     router.refresh();
@@ -454,17 +516,59 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
                </div>
 
                <div className="flex flex-col gap-2 rounded-lg border border-[#1E293B] bg-[#070A14] p-3 md:flex-row md:items-end">
-                 <div className="flex-1 space-y-1">
-                   <span className="text-[10px] tracking-widest text-[#475569]">ADD SKILL</span>
-                   <input
-                     id="add-skill-input"
-                     value={newSkill}
-                     onChange={(e) => { setNewSkill(e.target.value); setSkillError(null); }}
-                     className="w-full rounded-md border border-[#1E293B] bg-[#0F172A] px-2.5 py-2 text-sm text-white focus:border-[#14B8A6]/50 focus:outline-none"
-                     placeholder="e.g. typescript"
-                   />
-                   {skillError && <span className="text-[11px] text-[#EF4444]">{skillError}</span>}
-                 </div>
+                <div className="relative flex-1 space-y-1">
+                  <span className="text-[10px] tracking-widest text-[#475569]">ADD SKILL</span>
+                  <input
+                    id="add-skill-input"
+                    value={newSkill}
+                    onChange={(e) => handleSkillInput(e.target.value)}
+                    onKeyDown={handleSkillKeyDown}
+                    onFocus={() => setSkillOpen(true)}
+                    onBlur={() => {
+                      setTimeout(() => {
+                        setSkillOpen(false);
+                        setSkillHighlight(-1);
+                      }, 120);
+                    }}
+                    role="combobox"
+                    aria-expanded={skillOpen && newSkill.trim().length > 0}
+                    aria-controls="profile-skill-listbox"
+                    aria-activedescendant={skillHighlight >= 0 && skillSuggestions[skillHighlight] ? `profile-skill-option-${skillSuggestions[skillHighlight]}` : undefined}
+                    autoComplete="off"
+                    className="w-full rounded-md border border-[#1E293B] bg-[#0F172A] px-2.5 py-2 text-sm text-white focus:border-[#14B8A6]/50 focus:outline-none"
+                    placeholder="e.g. typescript"
+                  />
+                  {newSkill.trim().length > 0 && (
+                    skillOpen && skillSuggestions.length > 0 ? (
+                      <div
+                        id="profile-skill-listbox"
+                        role="listbox"
+                        className="absolute left-0 top-full z-20 mt-1 w-full rounded-md border border-[#1E293B] bg-[#0F172A] p-1 shadow-xl"
+                      >
+                        {skillSuggestions.map((s, i) => (
+                          <button
+                            key={s}
+                            type="button"
+                            id={`profile-skill-option-${s}`}
+                            role="option"
+                            aria-selected={i === skillHighlight}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => chooseSkill(s)}
+                            onMouseEnter={() => setSkillHighlight(i)}
+                            className={`w-full rounded px-2 py-1.5 text-left text-xs ${i === skillHighlight ? "bg-[#1E293B] text-white" : "text-[#CBD5E1] hover:bg-[#1E293B] hover:text-white"}`}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    ) : !committedSkill && skillSuggestions.length === 0 ? (
+                      <div className="absolute left-0 top-full z-20 mt-1 w-full rounded-md border border-[#1E293B] bg-[#0F172A] p-1 shadow-xl">
+                        <p className="px-2 py-1.5 text-[11px] text-[#475569]">No matching skills — pick from the dictionary</p>
+                      </div>
+                    ) : null
+                  )}
+                  {skillError && <span className="text-[11px] text-[#EF4444]">{skillError}</span>}
+                </div>
                  <div className="flex gap-2">
                    <input value={newSkillYears} onChange={(e) => setNewSkillYears(e.target.value)} className="w-20 rounded-md border border-[#1E293B] bg-[#0F172A] px-2.5 py-2 text-sm text-white focus:border-[#14B8A6]/50 focus:outline-none" placeholder="Years" />
                    <select value={newSkillTier} onChange={(e) => setNewSkillTier(e.target.value)} className="rounded-md border border-[#1E293B] bg-[#0F172A] px-2.5 py-2 text-sm text-white focus:border-[#14B8A6]/50 focus:outline-none">
@@ -473,7 +577,7 @@ export function ProfileClient({ initialData }: { initialData: InitialData }) {
                      <option value="familiar">Familiar</option>
                      <option value="learning">Learning</option>
                    </select>
-                   <button type="button" onClick={handleAddSkill} className="rounded-md bg-[#14B8A6] px-3 py-2 text-xs font-medium text-black hover:bg-[#2DD4BF]">Add</button>
+                    <button type="button" onClick={handleAddSkill} disabled={!committedSkill} title={!committedSkill ? "Pick a skill from the list first" : undefined} className="rounded-md bg-[#14B8A6] px-3 py-2 text-xs font-medium text-black hover:bg-[#2DD4BF] disabled:cursor-not-allowed disabled:opacity-40">Add</button>
                  </div>
                </div>
 

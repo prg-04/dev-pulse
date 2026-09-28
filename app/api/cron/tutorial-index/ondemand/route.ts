@@ -12,6 +12,14 @@ const BodySchema = z.object({
   skill: z.string().min(1),
 });
 
+// Per-user abuse protection (issue #2). The discovery_requests queue is
+// global per-skill, so without this one account could enqueue arbitrarily
+// many distinct skills. Table tutorial_ondemand_requests carries the
+// per-user log — see the pending migration SQL in the issue report.
+const MAX_REQUESTS_PER_HOUR = 5;
+const RATE_LIMIT_WINDOW_HOURS = 1;
+const IDEMPOTENCY_WINDOW_MINUTES = 30;
+
 export async function POST(req: NextRequest) {
   let body: unknown;
   try {
@@ -55,6 +63,74 @@ export async function POST(req: NextRequest) {
   const supabase = createServiceRoleClient();
   if (!supabase) {
     return NextResponse.json({ error: "Missing Supabase env" }, { status: 500 });
+  }
+
+  // Per-user rate limit + idempotency. Skipped only for the dev bypass,
+  // which has no user identity by definition (dev-only, never production).
+  if (user) {
+    const windowStart = new Date(
+      Date.now() - RATE_LIMIT_WINDOW_HOURS * 60 * 60 * 1000
+    ).toISOString();
+    const idempotencyStart = new Date(
+      Date.now() - IDEMPOTENCY_WINDOW_MINUTES * 60 * 1000
+    ).toISOString();
+
+    const { data: pending, error: pendingError } = await supabase
+      .from("tutorial_ondemand_requests")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("skill", normalizedSkill)
+      .gte("created_at", idempotencyStart)
+      .limit(1)
+      .maybeSingle();
+    if (pendingError) {
+      console.error(`[tutorial-index-ondemand] Request-log check failed:`, pendingError.message);
+      return NextResponse.json(
+        { error: "Request log unavailable (has the on-demand rate-limit migration been applied?)", skill },
+        { status: 500 }
+      );
+    }
+    if (pending) {
+      return NextResponse.json({
+        ok: true,
+        enqueued: false,
+        deduped: true,
+        skill: normalizedSkill,
+      });
+    }
+
+    const { data: recent, error: recentError } = await supabase
+      .from("tutorial_ondemand_requests")
+      .select("id")
+      .eq("user_id", user.id)
+      .gte("created_at", windowStart);
+    if (recentError) {
+      console.error(`[tutorial-index-ondemand] Rate-limit check failed:`, recentError.message);
+      return NextResponse.json(
+        { error: "Request log unavailable (has the on-demand rate-limit migration been applied?)", skill },
+        { status: 500 }
+      );
+    }
+    if ((recent ?? []).length >= MAX_REQUESTS_PER_HOUR) {
+      return NextResponse.json(
+        {
+          error: `Rate limit exceeded: max ${MAX_REQUESTS_PER_HOUR} on-demand requests per ${RATE_LIMIT_WINDOW_HOURS} hour(s)`,
+          skill,
+        },
+        { status: 429 }
+      );
+    }
+
+    const { error: logError } = await supabase
+      .from("tutorial_ondemand_requests")
+      .insert({ user_id: user.id, skill: normalizedSkill });
+    if (logError) {
+      console.error(`[tutorial-index-ondemand] Request-log insert failed:`, logError.message);
+      return NextResponse.json(
+        { error: "Request log unavailable (has the on-demand rate-limit migration been applied?)", skill },
+        { status: 500 }
+      );
+    }
   }
 
   try {

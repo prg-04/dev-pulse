@@ -41,10 +41,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const { data: { user } } = await supabaseAuth.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const service = createServiceRoleClient();
-  if (!service) return NextResponse.json({ error: "Missing Supabase env" }, { status: 500 });
-
-  const { data: posting, error: postingErr } = await service
+  // Reads are session-scoped (job_postings is public; job_summaries has an
+  // authenticated-read path). Writes stay on the service-role client:
+  // job_summaries has RLS enabled with no write policies, so session
+  // inserts/deletes are denied (42501) while service-role bypasses RLS.
+  const { data: posting, error: postingErr } = await supabaseAuth
     .from("job_postings")
     .select("id, description, title, company")
     .eq("id", id)
@@ -56,8 +57,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const nonblank = (s: string | null | undefined): boolean =>
     s != null && s.trim().length > 0;
 
+  const service = createServiceRoleClient();
+
   try {
-    const { data: cached } = await service.from("job_summaries").select("*").eq("job_id", id).maybeSingle();
+    const { data: cached } = await supabaseAuth.from("job_summaries").select("*").eq("job_id", id).maybeSingle();
     if (cached) {
       const row = cached as { about_company: string | null; the_role: string | null; what_you_will_do: string[] | null; requirements: string[] | null };
       const usable =
@@ -74,7 +77,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           cached: true,
         });
       }
-      await service.from("job_summaries").delete().eq("job_id", id);
+      await service?.from("job_summaries").delete().eq("job_id", id);
     }
   } catch {}
 
@@ -143,7 +146,7 @@ Return JSON only with keys: about_company (string or null), the_role (string or 
     summary.what_you_will_do.some((b) => nonblank(b)) ||
     summary.requirements.some((b) => nonblank(b));
 
-  if (hasContent) {
+  if (hasContent && service) {
     try {
       await service.from("job_summaries").insert({
         job_id: id,

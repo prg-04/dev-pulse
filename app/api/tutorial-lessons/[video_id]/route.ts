@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
-import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
 export const dynamic = "force-dynamic";
 
@@ -42,12 +41,9 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const service = createServiceRoleClient();
-  if (!service) {
-    return NextResponse.json({ error: "Missing Supabase env" }, { status: 500 });
-  }
-
-  const { data, error } = await service
+  // Session-scoped read: video_lessons has an authenticated-read RLS policy,
+  // so the caller's own session is sufficient — no service-role needed.
+  const { data, error } = await supabaseAuth
     .from("video_lessons")
     .select("video_id, sections, summary, generated_at, model, generation_status, generation_error")
     .eq("video_id", parsed.data.video_id)

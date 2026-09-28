@@ -206,6 +206,26 @@ export async function POST(req: NextRequest) {
 
   const metaMap = new Map((videoMeta ?? []).map((r) => [r.video_id, r]));
 
+  const missingIds = allVideoIds.filter((id) => !metaMap.has(id));
+  if (missingIds.length > 0) {
+    const { data: catalogMeta } = await supabase
+      .from("skill_video_catalog")
+      .select("video_id, title, channel_name, view_count, rank")
+      .in("video_id", missingIds)
+      .order("rank", { ascending: true });
+    for (const row of catalogMeta ?? []) {
+      const r = row as { video_id: string; title: string; channel_name: string; view_count: number | string | bigint | null };
+      if (!metaMap.has(r.video_id)) {
+        metaMap.set(r.video_id, {
+          video_id: r.video_id,
+          video_title: r.title,
+          channel_name: r.channel_name,
+          view_count: r.view_count == null ? null : Number(r.view_count),
+        });
+      }
+    }
+  }
+
   const results = merged.map((r) => {
     const meta = metaMap.get(r.video_id);
     const isChapter = r._type === "chapter";

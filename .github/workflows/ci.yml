@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the lint step can diff against the base branch.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          else
+            RANGE="HEAD~1...HEAD"
+          fi
+          FILES=$(git diff --name-only --diff-filter=ACMR "$RANGE" -- '*.ts' '*.tsx' '*.js' '*.jsx' | grep -v '^node_modules/' || true)
+          if [ -z "$FILES" ]; then
+            echo "No JS/TS files changed, skipping lint."
+            exit 0
+          fi
+          echo "Linting changed files:"
+          echo "$FILES"
+          npx eslint $FILES
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+// Import the real dictionary: fixtures using ALL_SKILLS as "every skill has
+// catalog rows" must track the actual dictionary, not a frozen copy.
+import { ALL_SKILLS } from "@/lib/skills-dictionary";
 
 // ---------------------------------------------------------------------------
 // server-only is a build-time guard; silence it in the test environment
@@ -44,36 +47,6 @@ vi.mock("@/lib/youtube/client", () => ({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-const ALL_SKILLS = [
-  "typescript",
-  "javascript",
-  "react",
-  "next.js",
-  "vue",
-  "angular",
-  "svelte",
-  "node.js",
-  "python",
-  "go",
-  "rust",
-  "java",
-  "c++",
-  "swift",
-  "kotlin",
-  "flutter",
-  "django",
-  "laravel",
-  "elixir",
-  "graphql",
-  "tailwindcss",
-  "postgresql",
-  "mongodb",
-  "redis",
-  "docker",
-  "kubernetes",
-  "aws",
-];
-
 function createMockSupabase(config: {
   usageRow?: { units_consumed: number } | null;
   discoveryRequests?: Array<{ skill: string; request_count: number; requested_at: string }>;
