@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
   let declining = mockGapReport.declining;
   let totalPostings = mockGapReport.totalPostings;
   let monthLabel = mockGapReport.monthLabel;
-  const skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }> = {};
+  const skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null }> = {};
 
   let top50: { skill: string; mention_count: number }[] = [];
   try {
@@ -161,14 +161,15 @@ export async function POST(req: NextRequest) {
         // Fetch indexing status for gap skills (Option B: on-demand trigger support).
         // Auxiliary UX data only (drives the "Find a lesson" button state) —
         // never report numbers. A failure here degrades to {} with a loud log
-        // rather than failing the whole report: e.g. prod is missing the
-        // on_demand_requested_at column (migration 013 unapplied) and that
-        // must not 500 gap submissions.
+        // rather than failing the whole report.
+        // NOTE: do not select on_demand_requested_at here — nothing writes it
+        // (its idempotency role moved into the enqueue RPC), and prod never
+        // received that column.
         try {
           const gapSkills = gaps.map((g) => g.skill);
           const { data: indexStatusRows, error: indexStatusError } = await supabase
             .from("skill_index_status")
-            .select("skill, total_chunks, total_chapters, last_run_status, last_error, on_demand_requested_at")
+            .select("skill, total_chunks, total_chapters, last_run_status, last_error")
             .in("skill", gapSkills);
           if (indexStatusError) throw new Error(indexStatusError.message);
           for (const row of indexStatusRows ?? []) {
@@ -177,7 +178,6 @@ export async function POST(req: NextRequest) {
               total_chapters: row.total_chapters ?? 0,
               last_run_status: row.last_run_status ?? null,
               last_error: row.last_error ?? null,
-              on_demand_requested_at: row.on_demand_requested_at ?? null,
             };
           }
         } catch (err) {

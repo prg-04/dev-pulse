@@ -26,7 +26,7 @@ export default async function GapReportPage() {
     yourSkills: string[];
     totalPostings: number;
     monthLabel: string;
-    skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }>;
+    skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null }>;
   } = {
     marketAlignmentPct: 0,
     index: 0,
@@ -139,16 +139,15 @@ export default async function GapReportPage() {
         const gapSkills = gaps.map((g) => g.skill);
         const { data: indexStatusRows } = await supabase
           .from("skill_index_status")
-          .select("skill, total_chunks, total_chapters, last_run_status, last_error, on_demand_requested_at")
+          .select("skill, total_chunks, total_chapters, last_run_status, last_error")
           .in("skill", gapSkills);
-        const skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null; on_demand_requested_at: string | null }> = {};
+        const skillIndexStatus: Record<string, { total_chunks: number; total_chapters: number; last_run_status: string | null; last_error: string | null }> = {};
         for (const row of indexStatusRows ?? []) {
           skillIndexStatus[row.skill] = {
             total_chunks: row.total_chunks ?? 0,
             total_chapters: row.total_chapters ?? 0,
             last_run_status: row.last_run_status ?? null,
             last_error: row.last_error ?? null,
-            on_demand_requested_at: row.on_demand_requested_at ?? null,
           };
         }
 

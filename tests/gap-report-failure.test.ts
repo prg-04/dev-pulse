@@ -146,7 +146,7 @@ describe("POST /api/gap-report (DB failure vs empty-data handling)", () => {
     expect(logged.some((m) => m.includes("gap_report_events") && m.includes("user-1"))).toBe(true);
   });
 
-  it("(d) the prod missing-column case degrades: index-status failure still serves 200", async () => {
+  it("(d) a skill_index_status failure degrades: still serves 200 with a loud log", async () => {
     const [cur, prev] = currentAndPrevMonth();
     const mockSupabase = mockSupabaseFor({
       skill_demand_snapshots: [
@@ -166,10 +166,11 @@ describe("POST /api/gap-report (DB failure vs empty-data handling)", () => {
         },
       ],
       job_postings: { data: null, count: 42 },
-      // Exact prod failure: migration 013's column was never applied.
+      // Generic index-status failure (e.g. the prod missing-column outage):
+      // auxiliary read, must degrade — not 500.
       skill_index_status: {
         data: null,
-        error: "column skill_index_status.on_demand_requested_at does not exist",
+        error: "skill_index_status unavailable",
       },
     });
 
