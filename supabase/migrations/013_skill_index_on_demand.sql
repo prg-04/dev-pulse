@@ -1,4 +1,4 @@
--- skill_index_status: support new statuses and on-demand tracking
+-- skill_index_status: support new statuses for on-demand tracking
 
 -- 1. Drop the old check constraint (PostgreSQL requires recreate).
 alter table skill_index_status
@@ -15,11 +15,6 @@ alter table skill_index_status
     'partial'
   ));
 
--- 3. Track when an on-demand indexing request was last fired for a skill.
---    Used for idempotency: if requested recently, skip duplicate triggers.
-alter table skill_index_status
-  add column if not exists on_demand_requested_at timestamptz;
-
-create index if not exists idx_skill_index_on_demand
-  on skill_index_status(on_demand_requested_at)
-  where on_demand_requested_at is not null;
+-- 3. The on_demand_requested_at column was intentionally dropped from this
+--    migration: nothing writes it (its idempotency role lives in the
+--    enqueue_discovery_request RPC cooldown), and no code selects it.

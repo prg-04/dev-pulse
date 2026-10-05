@@ -48,6 +48,14 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
   const [skills, setSkills] = useState<string[]>(initialReport.yourSkills);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // Skills with a discovery request enqueued this session (auto-enqueued on
+  // mount below, or via the card's "Find a lesson" button through
+  // handleSkillEnqueued). Feeds SkillsToConsiderCard's `isIndexing` branch so
+  // queued skills render "Finding you a lesson…" instead of "Not indexed yet".
+  // There is no server-readable pending signal (discovery_requests is
+  // service-role only), so this is intentionally session-local: it resets on
+  // reload, and the server's 30-minute idempotency dedupes repeat enqueues.
+  const [indexingSkills, setIndexingSkills] = useState<Set<string>>(new Set());
   const enqueuedRef = useRef<Set<string>>(new Set());
 
   // Enqueue discovery requests once per mount for gap skills that have no
@@ -62,6 +70,7 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
 
     skillsToEnqueue.forEach((skill) => {
       enqueuedRef.current.add(skill);
+      setIndexingSkills((prev) => new Set(prev).add(skill));
       fetch("/api/cron/tutorial-index/ondemand", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -73,6 +82,11 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
       }).catch((err) => {
         console.error(`[GapReportClient] Enqueue failed for ${skill}:`, err);
         enqueuedRef.current.delete(skill);
+        setIndexingSkills((prev) => {
+          const next = new Set(prev);
+          next.delete(skill);
+          return next;
+        });
       });
     });
   }, [report.gaps, report.skillIndexStatus]);
@@ -80,6 +94,11 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
   const handleRemove = (skill: string) => {
     setSkills((prev) => prev.filter((s) => s !== skill));
   };
+
+  const handleSkillEnqueued = useCallback((skill: string) => {
+    enqueuedRef.current.add(skill);
+    setIndexingSkills((prev) => new Set(prev).add(skill));
+  }, []);
 
   const handleReanalyse = useCallback(
     async (overrideSkills?: string[]) => {
@@ -174,7 +193,7 @@ export function GapReportClient({ initialReport }: { initialReport: Report }) {
 
         <StrengthsCard strengths={report.strengths} summary={report.strengthsSummary} />
 
-        <SkillsToConsiderCard gaps={report.gaps} skillIndexStatus={report.skillIndexStatus} indexingSkills={new Set()} />
+        <SkillsToConsiderCard gaps={report.gaps} skillIndexStatus={report.skillIndexStatus} indexingSkills={indexingSkills} onEnqueued={handleSkillEnqueued} />
 
         <RisingCard items={report.rising} summary={report.risingSummary} />
 

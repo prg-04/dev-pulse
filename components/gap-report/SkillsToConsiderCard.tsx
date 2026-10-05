@@ -27,6 +27,7 @@ type Props = {
   gaps: Gap[];
   skillIndexStatus?: Record<string, SkillIndexStatus>;
   indexingSkills?: Set<string>;
+  onEnqueued?: (skill: string) => void;
 };
 
 type OnDemandResult = {
@@ -53,7 +54,51 @@ function formatMMSS(s: number): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
-export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkills = new Set() }: Props) {
+export type TutorialPanelState =
+  | "indexing"
+  | "no-videos"
+  | "not-indexed"
+  | "loading"
+  | "empty"
+  | "results";
+
+export function getTutorialPanelState(args: {
+  isIndexing: boolean;
+  hasIndexedData: boolean;
+  catalogCount: number;
+  orphanCount: number;
+  loadingCatalog: boolean;
+  loadingTutorials: boolean;
+  onDemandStatus?: OnDemandResult["status"];
+}): TutorialPanelState {
+  if (args.isIndexing) return "indexing";
+  if (
+    !args.hasIndexedData &&
+    args.catalogCount === 0 &&
+    args.onDemandStatus === "skipped_no_results"
+  ) {
+    return "no-videos";
+  }
+  // The genuine empty state requires BOTH fetches settled and zero renderable
+  // rows of either kind. Checking catalog alone would shadow chapter-fallback
+  // orphans (tutorials with no catalog row) and would fire while the slower
+  // tutorial-search fetch is still in flight.
+  if (
+    !args.hasIndexedData &&
+    args.catalogCount === 0 &&
+    args.orphanCount === 0 &&
+    !args.loadingCatalog &&
+    !args.loadingTutorials &&
+    args.onDemandStatus !== "enqueued"
+  ) {
+    return "not-indexed";
+  }
+  if (args.loadingCatalog || args.loadingTutorials) return "loading";
+  if (args.catalogCount === 0 && args.orphanCount === 0) return "empty";
+  return "results";
+}
+
+export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkills = new Set(), onEnqueued }: Props) {
   const [selectedSkill, setSelectedSkill] = useState<string>(gaps[0]?.skill ?? "kubernetes");
   const [catalogVideos, setCatalogVideos] = useState<CatalogVideo[]>([]);
   const [tutorials, setTutorials] = useState<Tutorial[]>([]);
@@ -126,9 +171,10 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
         throw new Error(serverMsg);
       }
 
-      const json = (await res.json()) as { ok: boolean; enqueued: boolean; skill: string };
-      if (json.ok && json.enqueued) {
+      const json = (await res.json()) as { ok: boolean; enqueued: boolean; deduped?: boolean; skill: string };
+      if (json.ok && (json.enqueued || json.deduped)) {
         setOnDemandResults((prev) => ({ ...prev, [skill]: { status: "enqueued" } }));
+        onEnqueued?.(skill);
       } else {
         throw new Error("Enqueue did not succeed");
       }
@@ -142,7 +188,7 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
     } finally {
       setEnqueuing(false);
     }
-  }, [fetchCatalog]);
+  }, [fetchCatalog, onEnqueued]);
 
   const handleSkillSelect = useCallback((skill: string) => {
     setSelectedSkill(skill);
@@ -158,7 +204,6 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
   const hasIndexedData = (status?.total_chunks ?? 0) > 0 || (status?.total_chapters ?? 0) > 0;
   const isIndexing = indexingSkills.has(effectiveSkill);
   const onDemandResult = onDemandResults[effectiveSkill];
-  const showNoVideos = !isIndexing && !hasIndexedData && catalogVideos.length === 0 && onDemandResult?.status === "skipped_no_results";
 
   // Build tutorial overlay map: video_id -> best tutorial hit
   const tutorialOverlayMap = new Map<string, Tutorial>();
@@ -181,6 +226,16 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
   // Tutorial results that have no matching catalog video (shouldn't happen often,
   // but keep them visible so chapter-only hits aren't silently dropped)
   const orphanTutorials = tutorials.filter((t) => !catalogVideos.some((v) => v.video_id === t.video_id));
+
+  const panelState = getTutorialPanelState({
+    isIndexing,
+    hasIndexedData,
+    catalogCount: mergedVideos.length,
+    orphanCount: orphanTutorials.length,
+    loadingCatalog,
+    loadingTutorials,
+    onDemandStatus: onDemandResult?.status,
+  });
 
   return (
     <div className="rounded-xl border border-[#1E293B] bg-[#0F172A] p-5 border-l-2 border-l-[#EF4444] border-y-[#1E293B] border-r-[#1E293B]">
@@ -228,22 +283,24 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
                   ? "Loading…"
                   : mergedVideos.length > 0
                     ? `${mergedVideos.length} videos in catalog`
-                    : showNoVideos
-                      ? "No videos found"
-                      : hasIndexedData
-                        ? `${tutorials.length} targeted timestamps extracted`
-                        : onDemandResult?.status === "enqueued"
-                          ? "Enqueued — cron will index soon"
-                          : "Not indexed yet"}
+                    : orphanTutorials.length > 0
+                      ? `${orphanTutorials.length} targeted timestamps extracted`
+                      : panelState === "no-videos"
+                        ? "No videos found"
+                        : hasIndexedData
+                          ? `${tutorials.length} targeted timestamps extracted`
+                          : onDemandResult?.status === "enqueued"
+                            ? "Enqueued — cron will index soon"
+                            : "Not indexed yet"}
           </span>
         </div>
 
         <div className="mt-3 space-y-3">
-          {isIndexing ? (
+          {panelState === "indexing" ? (
             <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
               Finding you a lesson…
             </p>
-          ) : showNoVideos ? (
+          ) : panelState === "no-videos" ? (
             <div className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#64748B]">
               <p className="mb-2">No videos found for this skill</p>
               <button
@@ -255,7 +312,7 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
                 {enqueuing ? "Enqueuing…" : "Try again"}
               </button>
             </div>
-          ) : !hasIndexedData && mergedVideos.length === 0 && !loadingCatalog && onDemandResult?.status !== "enqueued" ? (
+          ) : panelState === "not-indexed" ? (
             <div className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#64748B]">
               <p className="mb-2">No tutorials indexed yet for this skill</p>
               <button
@@ -267,11 +324,11 @@ export function SkillsToConsiderCard({ gaps, skillIndexStatus = {}, indexingSkil
                 {enqueuing ? "Enqueuing…" : "Find a lesson"}
               </button>
             </div>
-          ) : loadingCatalog || loadingTutorials ? (
+          ) : panelState === "loading" ? (
             <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
               Searching tutorials…
             </p>
-          ) : mergedVideos.length === 0 && orphanTutorials.length === 0 ? (
+          ) : panelState === "empty" ? (
             <p className="rounded-lg border border-dashed border-[#1E293B] bg-[#0F172A] px-3 py-6 text-center text-xs text-[#475569]">
               {onDemandResult?.status === "enqueued"
                 ? "Enqueued — cron will index soon"
